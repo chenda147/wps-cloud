@@ -1,5 +1,7 @@
 name: Build and Push Docker Image
 
+# CI trigger marker: full codebase reset b3b0c4c
+
 on:
   push:
     branches:

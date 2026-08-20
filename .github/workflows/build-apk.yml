@@ -1,5 +1,7 @@
 name: Build Android APK
 
+# CI trigger marker: full codebase reset b3b0c4c
+
 on:
   workflow_dispatch:        # 手动触发
   push:
