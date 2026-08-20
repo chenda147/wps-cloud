@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Runtime data (moved to server/data/, gitignore there handles it)
+server/data/*
+!server/data/.gitkeep
+temp_downloads/
+strm_output/
+/cloud_accounts.json
+/cookie_config.json
+/dav_cache.json
+/storages.json
+/chase_tasks.json
+/strm_tasks.json
+
+# Root-level duplicate source files (canonical in server/)
+/app.py
+/cloud_clients.py
+/wps_cookie_dav.py
+/templates/
+/client/*
+!/client/mobile_app/
+/client/mobile_app/.buildozer/
+/client/mobile_app/bin/
+
+# Secrets / real credentials — DO NOT COMMIT
+client/config.json
+server/config/config.json
+server/_probe_big.py
+chase_tasks.json.bak
+*.bak
+
+# Misc
+*.har
+*.png
+*.zip
+*.rar
+*.bin
+/start.bat
+/ (1)/
+
+# Local debug artifacts
+device_log.txt
+font_debug*.txt
+font_diag*.txt
+kivy_log2.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Environment
+.env

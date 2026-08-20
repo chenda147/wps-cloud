@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ name }} - WPS 云盘</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+:root {
+    --bg: #0a0a10; --bg2: #111118;
+    --surface: rgba(255,255,255,0.03); --hover: rgba(255,255,255,0.06);
+    --border: rgba(255,255,255,0.06); --text: #e8e8f0; --text2: #8888a0;
+    --accent: #6366f1; --accent2: #818cf8; --danger: #ef4444;
+    --radius: 14px; --radius-sm: 10px; --t: 0.2s ease;
+    --nav-h: 56px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+}
+
+.navbar {
+    width: 100%; height: var(--nav-h);
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(10,10,16,0.85);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+}
+.navbar-inner {
+    width: 48.8%; min-width: 520px; max-width: 960px;
+    display: flex; align-items: center; gap: 16px;
+}
+.brand {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 18px; font-weight: 700; color: var(--text);
+    text-decoration: none; white-space: nowrap; cursor: pointer;
+}
+.brand .logo {
+    width: 34px; height: 34px;
+    background: linear-gradient(135deg, var(--accent), #a855f7);
+    border-radius: 9px; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; color: #fff;
+}
+.back-btn {
+    color: var(--text2); font-size: 16px; cursor: pointer; text-decoration: none;
+    padding: 6px 10px; border-radius: 6px; transition: var(--t); margin-left: -4px;
+}
+.back-btn:hover { color: var(--text); background: var(--hover); }
+
+.breadcrumb-bar {
+    display: flex; align-items: center; gap: 4px;
+    padding: 14px 0 10px; font-size: 13px;
+    flex-wrap: wrap; min-height: 40px;
+}
+.breadcrumb-bar a {
+    color: var(--text2); text-decoration: none;
+    padding: 4px 8px; border-radius: 6px; transition: var(--t);
+    white-space: nowrap;
+}
+.breadcrumb-bar a:hover { color: var(--text); background: var(--hover); }
+.breadcrumb-bar .sep { color: var(--text2); font-size: 9px; margin: 0 1px; opacity: 0.4; }
+.breadcrumb-bar .current { color: var(--text); font-weight: 600; padding: 4px 8px; }
+
+.main-wrap {
+    width: 48.8%; min-width: 520px; max-width: 960px;
+    flex: 1; display: flex; flex-direction: column; padding: 0 0 20px;
+}
+
+.p-header {
+    display: flex; align-items: center; gap: 12px; padding: 8px 0 16px;
+}
+.p-label {
+    font-size: 11px; color: var(--text2); text-transform: uppercase;
+    letter-spacing: 1px; padding: 3px 8px; border-radius: 4px;
+    background: var(--surface); border: 1px solid var(--border);
+}
+.p-name {
+    font-size: 15px; font-weight: 500; color: var(--text);
+    word-break: break-all;
+}
+
+.img-wrap {
+    width: 100%; border-radius: var(--radius);
+    overflow: hidden; background: #000;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 20px; min-height: 200px;
+}
+img {
+    max-width: 100%; max-height: 72vh;
+    object-fit: contain; display: block;
+}
+</style>
+</head>
+<body>
+<nav class="navbar">
+    <div class="navbar-inner">
+        <a class="brand" href="/"><div class="logo"><i class="fa-solid fa-cloud"></i></div>WPS 云盘</a>
+        <a class="back-btn" href="/" title="返回主页"><i class="fa-solid fa-house"></i></a>
+    </div>
+</nav>
+<div class="main-wrap">
+    <div class="breadcrumb-bar" id="breadcrumbBar">
+        <i class="fa-solid fa-spinner fa-pulse" style="color:var(--text2);"></i>
+    </div>
+    <div class="p-header">
+        <span class="p-label">Image</span>
+        <span class="p-name">{{ name }}</span>
+    </div>
+    <div class="img-wrap">
+        <img id="imageViewer" src="" alt="{{ name }}">
+    </div>
+    <div style="font-size:12px;color:var(--text2);padding:0 0 20px;text-align:center;">
+        由 WPS 云盘驱动
+    </div>
+</div>
+<script>
+(function(){
+    const mountCtx = {{ mount_ctx|tojson }};
+    const fileId = {{ file_id|tojson }};
+    const pid = {{ pid|tojson }};
+    const fname = {{ name|tojson }};
+    const mc = mountCtx ? 'mount_ctx=' + encodeURIComponent(mountCtx) : '';
+    document.getElementById('imageViewer').src = '/raw/' + encodeURIComponent(fileId) + (mc ? '?' + mc : '');
+
+    const bc = document.getElementById('breadcrumbBar');
+    async function loadBc() {
+        try {
+            let bpId = pid;
+            if (!bpId) {
+                const u = '/api/public/fileinfo/' + encodeURIComponent(fileId) + (mc ? '?' + mc : '');
+                const r = await fetch(u); const d = await r.json();
+                if (d.parent_id) bpId = d.parent_id;
+            }
+            if (!bpId) {
+                bc.innerHTML = '<a href="/"><i class="fa-solid fa-house" style="margin-right:4px;font-size:11px;"></i>主页</a> <span class="sep"><i class="fa-solid fa-chevron-right"></i></span> <span class="current">' + escHtml(fname) + '</span>';
+                return;
+            }
+            const u = '/api/public/breadcrumbs?parent_id=' + encodeURIComponent(bpId) + (mc ? '&mount_ctx=' + encodeURIComponent(mountCtx) : '');
+            const r = await fetch(u); const d = await r.json();
+            const crumbs = d.breadcrumbs || [];
+            let html = '';
+            crumbs.forEach(function(c, i) {
+                if (i > 0) html += ' <span class="sep"><i class="fa-solid fa-chevron-right"></i></span> ';
+                if (c.id) {
+                    html += '<a href="/?open=' + encodeURIComponent(c.id) + (mc ? '&mount_ctx=' + encodeURIComponent(mountCtx) : '') + '">' + escHtml(c.name) + '</a>';
+                } else {
+                    html += '<a href="/"><i class="fa-solid fa-house" style="margin-right:4px;font-size:11px;"></i>' + escHtml(c.name) + '</a>';
+                }
+            });
+            html += ' <span class="sep"><i class="fa-solid fa-chevron-right"></i></span> ';
+            html += '<span class="current">' + escHtml(fname) + '</span>';
+            bc.innerHTML = html;
+        } catch(e) {
+            bc.innerHTML = '<a href="/"><i class="fa-solid fa-house" style="margin-right:4px;font-size:11px;"></i>主页</a> <span class="sep"><i class="fa-solid fa-chevron-right"></i></span> <span class="current">' + escHtml(fname) + '</span>';
+        }
+    }
+    function escHtml(s) {
+        return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    loadBc();
+})();
+</script>
+</body>
+</html>

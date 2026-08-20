@@ -1,0 +1,130 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:        # 手动触发
+  push:
+    paths:
+      - 'client/mobile_app/**'
+      - '.github/workflows/build-apk.yml'
+  pull_request:
+    paths:
+      - 'client/mobile_app/**'
+
+jobs:
+  build-apk:
+    name: Build APK (buildozer)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: client/mobile_app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache buildozer global directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: ${{ runner.os }}-buildozer-${{ hashFiles('client/mobile_app/buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-
+
+      - name: Setup swap space (prevent OOM during cross-compile)
+        # 容错：swap 创建失败不能中断构建（有些 runner 环境禁止 swapon）
+        run: |
+          df -h
+          if ! sudo swapon --show | grep -q swapfile; then
+            sudo fallocate -l 4G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile || echo "WARNING: swapon failed, continuing without swap"
+          fi
+          free -h
+        continue-on-error: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-pip python3-setuptools python3-wheel \
+            build-essential git zip unzip openjdk-17-jdk \
+            libffi-dev libssl-dev libltdl-dev \
+            libncurses5-dev libncursesw5-dev libtinfo5 \
+            libbz2-dev libsqlite3-dev liblzma-dev \
+            ccache autoconf automake libtool \
+            pkg-config zlib1g-dev \
+            cmake curl wget
+
+      - name: Install buildozer
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          # 固定版本避免上游变更导致构建漂移；cython 0.29.x 为 p4a 兼容版本
+          python -m pip install buildozer==1.6.0 cython==0.29.36
+          buildozer --version
+
+      - name: Set JAVA_HOME to JDK 17
+        # runner 默认 JAVA_HOME 指向自带的 Java 11，而新版 Android Gradle Plugin 需要 Java 17
+        run: |
+          JDK17="/usr/lib/jvm/java-17-openjdk-amd64"
+          if [ ! -d "$JDK17" ]; then
+            JDK17=$(ls -d /usr/lib/jvm/*17* 2>/dev/null | head -1)
+          fi
+          if [ -z "$JDK17" ] || [ ! -x "$JDK17/bin/java" ]; then
+            echo "ERROR: JDK 17 not found" >&2
+            exit 1
+          fi
+          echo "JAVA_HOME=$JDK17" >> "$GITHUB_ENV"
+          echo "$JDK17/bin" >> "$GITHUB_PATH"
+          java -version 2>&1
+
+      - name: Build APK (debug)
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
+          ls -lh bin/
+        env:
+          CI: 'true'
+          LC_ALL: 'C.UTF-8'
+          LANG: 'C.UTF-8'
+          JAVA_HOME: '/usr/lib/jvm/java-17-openjdk-amd64'
+        shell: bash
+
+      - name: Upload APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WPS传输工具-APK
+          path: client/mobile_app/bin/*.apk
+          if-no-files-found: error
+
+      - name: Print build log tail (on failure)
+        if: failure()
+        # 只提取关键错误行，避免 verbose 全量日志被 GitHub 截断
+        run: |
+          echo "===== [1] ERROR-like lines in build.log ====="
+          grep -inE "error|failed|fail |killed|fatal|cannot|unable|not found|exception|traceback|no such" build.log 2>/dev/null | tail -60 || true
+          echo ""
+          echo "===== [2] Last 80 lines of build.log ====="
+          tail -n 80 build.log 2>/dev/null || true
+          echo ""
+          echo "===== [3] All *.log files under .buildozer ====="
+          find .buildozer -name '*.log' -type f 2>/dev/null | head -30 || true
+          for f in $(find .buildozer -name '*.log' -type f 2>/dev/null | head -6); do
+            echo "----- $f (last 80 lines) -----"
+            tail -n 80 "$f" || true
+          done
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-logs
+          path: |
+            client/mobile_app/build.log
+            client/mobile_app/.buildozer/**/*.log
+          if-no-files-found: ignore

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+*.md
+start.bat
+temp_downloads/
+strm_output/
+client/
+下载.png
+yun.139.com.har
+ (1)/
+.vscode/
+.idea/
+.env
+*.log

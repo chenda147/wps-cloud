@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0a0a10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="追更管家">
+<link rel="manifest" href="/admin/mobile_manifest.json">
+<link rel="apple-touch-icon" href="/admin/mobile_icon.svg">
+<link rel="icon" href="/admin/mobile_icon.svg">
+<title>追更管家</title>
+<style>
+:root {
+    --bg: #0a0a10; --bg2: #111118;
+    --surface: rgba(255,255,255,0.04); --surface2: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.08);
+    --text: #e8e8f0; --text2: #9aa0b4; --text3: #5c6274;
+    --accent: #6366f1; --accent2: #818cf8;
+    --green: #22c55e; --yellow: #eab308; --red: #ef4444; --blue: #3b82f6; --gray: #6b7280;
+    --radius: 16px; --radius-sm: 10px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: calc(64px + var(--safe-bottom));
+}
+
+/* ── 顶栏 ── */
+.header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(10,10,16,0.85);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    padding: calc(10px + var(--safe-top)) 16px 10px;
+    display: flex; align-items: center; gap: 12px;
+}
+.header .logo {
+    width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 800; color: #fff;
+}
+.header .title { font-size: 17px; font-weight: 700; }
+.header .sub { font-size: 11px; color: var(--text3); margin-top: 1px; }
+.header .spacer { flex: 1; }
+.conn-badge {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--text2);
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 4px 9px; border-radius: 20px;
+}
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); }
+.conn-dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.conn-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+/* ── 主内容 ── */
+.main { padding: 14px 16px calc(20px + var(--safe-bottom)); max-width: 560px; margin: 0 auto; }
+.page { display: none; }
+.page.active { display: block; }
+
+/* 下拉刷新提示 */
+.pull-hint {
+    text-align: center; font-size: 12px; color: var(--text3);
+    padding: 6px 0 2px; height: 26px;
+}
+
+/* 统计卡片 */
+.stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    margin: 4px 0 18px;
+}
+.stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 10px;
+    text-align: center;
+}
+.stat-card .num { font-size: 22px; font-weight: 800; line-height: 1.2; }
+.stat-card .num.blue { color: var(--blue); }
+.stat-card .num.green { color: var(--green); }
+.stat-card .num.yellow { color: var(--yellow); }
+.stat-card .lbl { font-size: 11px; color: var(--text2); margin-top: 3px; }
+
+/* 区块标题 */
+.section-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 700; margin: 20px 0 10px;
+}
+.section-title .count {
+    font-size: 11px; font-weight: 600; color: var(--accent2);
+    background: rgba(99,102,241,0.12); padding: 2px 8px; border-radius: 20px;
+}
+.section-title .refresh-btn {
+    margin-left: auto; font-size: 11px; color: var(--text2);
+    background: var(--surface2); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 20px; cursor: pointer;
+}
+.section-title .refresh-btn:active { background: rgba(255,255,255,0.12); }
+
+/* 客户端卡片 */
+.client-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px;
+    margin-bottom: 10px;
+}
+.client-top { display: flex; align-items: center; gap: 10px; }
+.client-name { font-size: 15px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-pill {
+    font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px;
+    background: rgba(107,114,128,0.15); color: var(--text2);
+}
+.status-pill.online { background: rgba(34,197,94,0.15); color: var(--green); }
+.status-pill.offline { background: rgba(239,68,68,0.15); color: var(--red); }
+.client-info {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+    margin-top: 12px; font-size: 12px; color: var(--text2);
+}
+.client-info .k { color: var(--text3); margin-right: 5px; }
+.client-info .v { color: var(--text); word-break: break-all; }
+.client-progress-bar {
+    margin-top: 10px; height: 4px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;
+}
+.client-progress-bar .fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 4px; transition: width 0.5s ease;
+}
+
+/* 任务卡片 */
+.task-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 13px 14px;
+    margin-bottom: 10px;
+}
+.task-top { display: flex; align-items: flex-start; gap: 10px; }
+.task-icon {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700; color: #fff;
+}
+.task-icon.chase { background: linear-gradient(135deg, #8b5cf6, #6366f1); }
+.task-icon.download { background: linear-gradient(135deg, #3b82f6, #06b6d4); }
+.task-icon.upload { background: linear-gradient(135deg, #f59e0b, #ef4444); }
+.task-icon.check { background: linear-gradient(135deg, #22c55e, #84cc16); }
+.task-body { flex: 1; min-width: 0; }
+.task-name { font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-meta {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-top: 5px; font-size: 11px; color: var(--text2);
+}
+.task-meta .tag {
+    background: var(--surface2); padding: 2px 7px; border-radius: 6px;
+}
+.task-status {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+    background: rgba(107,114,128,0.15); color: var(--text2);
+}
+.task-status.pending { color: var(--yellow); background: rgba(234,179,8,0.12); }
+.task-status.running { color: var(--blue); background: rgba(59,130,246,0.14); }
+.task-status.done { color: var(--green); background: rgba(34,197,94,0.14); }
+.task-status.error { color: var(--red); background: rgba(239,68,68,0.14); }
+.task-status.cancelled { color: var(--text3); background: rgba(107,114,128,0.1); }
+.task-progress-bar {
+    margin-top: 9px; height: 4px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;
+}
+.task-progress-bar .fill {
+    height: 100%; border-radius: 4px; transition: width 0.5s ease;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+.task-progress-bar .fill.done { background: linear-gradient(90deg, #22c55e, #84cc16); }
+.task-progress-bar .fill.error { background: linear-gradient(90deg, #ef4444, #f97316); }
+.task-msg {
+    margin-top: 7px; font-size: 11px; color: var(--text2);
+    word-break: break-all; line-height: 1.5;
+    max-height: 3em; overflow: hidden;
+}
+.task-foot {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 8px; font-size: 10.5px; color: var(--text3);
+}
+
+/* 追更卡片 */
+.chase-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 12px; margin-bottom: 8px;
+    transition: background 0.2s;
+}
+.chase-top { display: flex; align-items: flex-start; gap: 10px; }
+.chase-name { font-size: 15px; font-weight: 700; flex: 1; min-width: 0; line-height: 1.3; }
+.chase-name .sub { font-size: 10.5px; color: var(--text3); font-weight: 400; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert-pill {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+    background: rgba(107,114,128,0.15); color: var(--text2);
+}
+.alert-pill.ok { background: rgba(34,197,94,0.13); color: var(--green); }
+.alert-pill.warn { background: rgba(234,179,8,0.13); color: var(--yellow); }
+.alert-pill.danger { background: rgba(239,68,68,0.13); color: var(--red); }
+
+/* 进度行：已存 / 缺失 + 细进度条 */
+.chase-progress-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text2); }
+.chase-progress-row .have { color: var(--text); font-weight: 600; }
+.chase-progress-row .miss { color: var(--text3); }
+.chase-progress-row .latest { margin-left: auto; color: var(--text3); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+.chase-progress-bar { margin-top: 7px; height: 3px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
+.chase-progress-bar .fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; }
+
+/* 脚注：检查时间 */
+.chase-foot { margin-top: 8px; font-size: 10.5px; color: var(--text3); display: flex; align-items: center; gap: 4px; }
+
+/* 操作区：主按钮(pill) + 文字次按钮 */
+.chase-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.btn {
+    text-align: center; font-size: 13px; font-weight: 600;
+    padding: 8px 14px; border-radius: 11px; border: none;
+    background: var(--surface2); color: var(--text); cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+}
+.btn:active { background: rgba(255,255,255,0.14); }
+.btn.primary { background: rgba(99,102,241,0.18); color: var(--accent2); flex: 1; }
+.btn.primary:active { background: rgba(99,102,241,0.3); }
+/* 文字型次操作按钮：无边框、轻量 */
+.btn.text {
+    background: transparent; color: var(--text2);
+    padding: 8px 10px; font-size: 12.5px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 3px;
+}
+.btn.text:active { background: rgba(255,255,255,0.08); }
+.btn.text.danger { color: var(--red); }
+.btn:disabled { opacity: 0.45; }
+
+/* 下载管理：客户端运行任务 */
+.dl-client { margin-bottom: 14px; }
+.dl-client-name { font-size: 13px; font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.dl-client-name .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.dl-task {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 11px 12px; margin-bottom: 8px;
+}
+.dl-task-top { display: flex; align-items: center; gap: 8px; }
+.dl-task-name { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-task-pct { font-size: 12px; color: var(--text2); flex-shrink: 0; }
+.dl-task-bar { margin-top: 7px; height: 4px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; }
+.dl-task-bar .fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 4px; transition: width 0.5s; }
+.dl-task-meta { margin-top: 6px; font-size: 11px; color: var(--text3); display: flex; gap: 10px; flex-wrap: wrap; }
+.dl-task-btn { margin-top: 8px; font-size: 12px; color: var(--red); background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.dl-task-btn:active { background: rgba(239,68,68,0.2); }
+.dl-task-btn:disabled { opacity: 0.5; }
+
+/* 日志页 */
+.log-toolbar { display: flex; gap: 8px; margin: 6px 0 12px; flex-wrap: wrap; align-items: center; }
+.log-search {
+    flex: 1; min-width: 120px; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 13px; padding: 9px 12px; outline: none;
+}
+.log-search:focus { border-color: var(--accent); }
+.log-levels { display: flex; gap: 6px; flex-wrap: wrap; }
+.log-level {
+    font-size: 11px; font-weight: 600; padding: 6px 11px; border-radius: 20px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+}
+.log-level.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.log-list { font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; line-height: 1.55; }
+.log-item {
+    padding: 6px 10px; border-radius: 8px; margin-bottom: 4px;
+    background: var(--surface); border-left: 3px solid var(--border);
+    word-break: break-word;
+}
+.log-item .ts { color: var(--text3); margin-right: 7px; }
+.log-item .lv { font-weight: 700; margin-right: 7px; }
+.log-item.debug { border-left-color: var(--gray); }
+.log-item.info { border-left-color: var(--blue); }
+.log-item.info .lv { color: var(--blue); }
+.log-item.warning { border-left-color: var(--yellow); background: rgba(234,179,8,0.06); }
+.log-item.warning .lv { color: var(--yellow); }
+.log-item.error { border-left-color: var(--red); background: rgba(239,68,68,0.08); }
+.log-item.error .lv { color: var(--red); }
+.log-item.error .msg { color: #ffd0d0; }
+.log-item.critical { border-left-color: var(--red); background: rgba(239,68,68,0.14); }
+.log-item.critical .lv { color: var(--red); }
+.log-item.critical .msg { color: #ffbcbc; font-weight: 600; }
+.log-empty { text-align: center; color: var(--text3); padding: 40px 0; }
+
+/* 空状态 */
+.empty {
+    text-align: center; color: var(--text3); font-size: 13px;
+    padding: 36px 0;
+}
+.empty .big { font-size: 34px; margin-bottom: 10px; opacity: 0.5; }
+
+/* 登录遮罩 */
+#login-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: var(--bg); display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+}
+#login-overlay.hidden { display: none; }
+.login-box {
+    width: 100%; max-width: 360px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 28px 22px;
+}
+.login-box .logo {
+    width: 48px; height: 48px; border-radius: 14px; margin: 0 auto 14px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 800; color: #fff;
+}
+.login-box h2 { text-align: center; font-size: 18px; margin-bottom: 4px; }
+.login-box .hint { text-align: center; font-size: 12px; color: var(--text3); margin-bottom: 18px; }
+.login-box input {
+    width: 100%; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 15px;
+    padding: 12px 14px; margin-bottom: 10px; outline: none;
+}
+.login-box input:focus { border-color: var(--accent); }
+.login-btn {
+    width: 100%; padding: 12px; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff; font-size: 15px; font-weight: 700; cursor: pointer;
+    margin-top: 4px;
+}
+.login-btn:disabled { opacity: 0.6; }
+.login-err { color: var(--red); font-size: 12px; text-align: center; margin-top: 10px; min-height: 18px; }
+
+/* 底部刷新时间 */
+.footer {
+    text-align: center; font-size: 11px; color: var(--text3);
+    padding: 18px 0 8px;
+}
+
+/* 底部 tab 导航 */
+.tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 80;
+    display: flex; background: rgba(10,10,16,0.92);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border);
+    padding-bottom: var(--safe-bottom);
+}
+.tab-item {
+    flex: 1; text-align: center; padding: 8px 0 6px; cursor: pointer;
+    color: var(--text3); font-size: 10.5px; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+}
+.tab-item .ic { font-size: 18px; line-height: 1; }
+.tab-item.active { color: var(--accent2); }
+.tab-item .badge {
+    position: absolute; margin-left: 16px; margin-top: -4px;
+    background: var(--red); color: #fff; font-size: 9px; font-weight: 700;
+    min-width: 15px; height: 15px; line-height: 15px; border-radius: 8px; padding: 0 4px;
+}
+
+/* 闪烁动画（新数据） */
+@keyframes flash { 0% { background: rgba(99,102,241,0.18); } 100% { background: var(--surface); } }
+.flash { animation: flash 1s ease; }
+
+/* 骨架屏 */
+.skeleton {
+    background: linear-gradient(90deg, var(--surface) 25%, var(--surface2) 50%, var(--surface) 75%);
+    background-size: 200% 100%; animation: shimmer 1.2s infinite;
+    border-radius: var(--radius); height: 72px; margin-bottom: 10px;
+}
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* 轻提示 */
+.toast {
+    position: fixed; left: 50%; top: 20%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.85); color: #fff; font-size: 13px;
+    padding: 10px 18px; border-radius: 12px; z-index: 200;
+    opacity: 0; transition: opacity 0.25s; pointer-events: none; max-width: 80%;
+    text-align: center;
+}
+.toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- 顶栏 -->
+<header class="header">
+    <div class="logo">追</div>
+    <div>
+        <div class="title">追更管家</div>
+        <div class="sub" id="sub-info">连接中…</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="conn-badge"><span class="conn-dot" id="conn-dot"></span><span id="conn-text">未连接</span></div>
+</header>
+
+<div class="main">
+    <div class="pull-hint" id="pull-hint">下拉刷新</div>
+
+    <!-- 监控页 -->
+    <div class="page active" id="page-monitor">
+        <div class="stats">
+            <div class="stat-card">
+                <div class="num blue" id="stat-clients">–</div>
+                <div class="lbl">在线客户端</div>
+            </div>
+            <div class="stat-card">
+                <div class="num green" id="stat-running">–</div>
+                <div class="lbl">执行中</div>
+            </div>
+            <div class="stat-card">
+                <div class="num yellow" id="stat-total">–</div>
+                <div class="lbl">任务总数</div>
+            </div>
+        </div>
+
+        <div class="section-title">
+            <span>客户端</span>
+            <span class="count" id="client-count">0</span>
+            <button class="refresh-btn" id="btn-refresh-mon">刷新</button>
+        </div>
+        <div id="client-list"></div>
+
+        <div class="section-title">
+            <span>任务</span>
+            <span class="count" id="task-count">0</span>
+        </div>
+        <div id="task-list"></div>
+    </div>
+
+    <!-- 追更页 -->
+    <div class="page" id="page-chase">
+        <div class="section-title">
+            <span>追更列表</span>
+            <span class="count" id="chase-count">0</span>
+            <button class="refresh-btn" id="btn-refresh-chase">刷新</button>
+        </div>
+        <div id="chase-list"></div>
+    </div>
+
+    <!-- 下载管理页 -->
+    <div class="page" id="page-download">
+        <div class="section-title">
+            <span>下载管理</span>
+            <span class="count" id="dl-count">0</span>
+            <button class="refresh-btn" id="btn-refresh-dl">刷新</button>
+        </div>
+        <div id="dl-list"></div>
+    </div>
+
+    <!-- 日志页 -->
+    <div class="page" id="page-log">
+        <div class="log-toolbar">
+            <input class="log-search" id="log-search" placeholder="搜索日志内容…">
+            <div class="log-levels" id="log-levels">
+                <span class="log-level active" data-lv="ALL">全部</span>
+                <span class="log-level" data-lv="ERROR">错误</span>
+                <span class="log-level" data-lv="WARNING">警告</span>
+                <span class="log-level" data-lv="INFO">信息</span>
+                <span class="log-level" data-lv="DEBUG">调试</span>
+            </div>
+        </div>
+        <div class="log-list" id="log-list"></div>
+    </div>
+
+    <div class="footer" id="footer-time"></div>
+</div>
+
+<!-- 底部 tab -->
+<nav class="tabbar" id="tabbar">
+    <div class="tab-item active" data-tab="monitor"><span class="ic">📊</span>监控</div>
+    <div class="tab-item" data-tab="chase"><span class="ic">🎬</span>追更<span class="badge" id="badge-chase" style="display:none">0</span></div>
+    <div class="tab-item" data-tab="download"><span class="ic">⬇️</span>下载<span class="badge" id="badge-dl" style="display:none">0</span></div>
+    <div class="tab-item" data-tab="log"><span class="ic">📜</span>日志</div>
+</nav>
+
+<!-- 登录遮罩 -->
+<div id="login-overlay" class="hidden">
+    <div class="login-box">
+        <div class="logo">追</div>
+        <h2>追更管家</h2>
+        <div class="hint">登录后管理追更与下载任务</div>
+        <input id="login-user" placeholder="用户名" autocomplete="username">
+        <input id="login-pass" type="password" placeholder="密码" autocomplete="current-password">
+        <button class="login-btn" id="login-btn">登 录</button>
+        <div class="login-err" id="login-err"></div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+    'use strict';
+    var $ = function (id) { return document.getElementById(id); };
+    var REFRESH_MS = 8000;
+    var timer = null, loading = false;
+    var currentTab = 'monitor';
+    var logLevel = 'ALL', logQuery = '', logTotal = 0;
+
+    var STATUS_TEXT = {
+        pending: '排队中', running: '执行中', done: '已完成',
+        error: '失败', cancelled: '已取消'
+    };
+    var TYPE_TEXT = {
+        'chase-download': '追更下载', download: '下载', upload: '上传',
+        'chase-check': '追更检查', strm: 'STRM', check: '检查'
+    };
+    var TYPE_ICON = {
+        'chase-download': '追', download: '下', upload: '传',
+        'chase-check': '查', strm: 'S', check: '查'
+    };
+    var TYPE_CLASS = {
+        'chase-download': 'chase', download: 'download', upload: 'upload',
+        'chase-check': 'check', strm: 'check', check: 'check'
+    };
+    var ALERT_TEXT = { ok: '正常', warn: '预警', danger: '告急' };
+
+    function fmtTime(ts) {
+        if (!ts) return '';
+        var d = new Date(ts * 1000);
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+    function ago(ts) {
+        if (!ts) return '—';
+        var s = Math.floor(Date.now() / 1000) - ts;
+        if (s < 0) s = 0;
+        if (s < 60) return s + '秒前';
+        if (s < 3600) return Math.floor(s / 60) + '分钟前';
+        if (s < 86400) return Math.floor(s / 3600) + '小时前';
+        return Math.floor(s / 86400) + '天前';
+    }
+    function esc(s) {
+        if (s === null || s === undefined) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function isOnline(info, now) {
+        if (!info) return false;
+        var ts = info._last_ts || 0;
+        return (now - ts) < 330; // 5.5 分钟内有心跳视为在线
+    }
+
+    /* ── 轻提示 ── */
+    var toastTimer = null;
+    function toast(msg) {
+        var t = $('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { t.classList.remove('show'); }, 1800);
+    }
+
+    /* ── 监控页渲染 ── */
+    function renderClients(clients) {
+        var now = Date.now() / 1000;
+        var box = $('client-list');
+        var online = 0;
+        if (!clients || !clients.length) {
+            box.innerHTML = '<div class="empty"><div class="big">📡</div>暂无客户端连接<br>请先在电脑上启动客户端</div>';
+            $('client-count').textContent = '0';
+            return 0;
+        }
+        var html = '';
+        clients.forEach(function (c) {
+            var on = isOnline(c, now);
+            if (on) online++;
+            var active = c.active_count || 0;
+            var max = c.max_concurrent || 1;
+            var pct = Math.min(100, Math.round(active / max * 100));
+            var version = c.version || '—';
+            var cloud = (c.cloud_types || []).map(function (x) {
+                return { 'wps': 'WPS', 'quark': '夸克' }[x] || x;
+            }).join(' / ') || '—';
+            var name = c.client_name || '未命名客户端';
+            html += '<div class="client-card">' +
+                '<div class="client-top">' +
+                '<span class="client-name">' + esc(name) + '</span>' +
+                '<span class="status-pill ' + (on ? 'online' : 'offline') + '">' + (on ? '在线' : '离线') + '</span>' +
+                '</div>' +
+                '<div class="client-info">' +
+                '<div><span class="k">IP</span><span class="v">' + esc(c.ip || '—') + '</span></div>' +
+                '<div><span class="k">版本</span><span class="v">' + esc(version) + '</span></div>' +
+                '<div><span class="k">并发</span><span class="v">' + active + ' / ' + max + '</span></div>' +
+                '<div><span class="k">云盘</span><span class="v">' + esc(cloud) + '</span></div>' +
+                '<div><span class="k">心跳</span><span class="v">' + ago(c._last_ts) + '</span></div>' +
+                '<div><span class="k">上次</span><span class="v">' + esc(c.last_seen || '—') + '</span></div>' +
+                '</div>' +
+                '<div class="client-progress-bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+                '</div>';
+        });
+        box.innerHTML = html;
+        $('client-count').textContent = clients.length;
+        return online;
+    }
+
+    function renderTasks(tasks) {
+        var box = $('task-list');
+        var running = 0;
+        if (!tasks || !tasks.length) {
+            box.innerHTML = '<div class="empty"><div class="big">🗂️</div>暂无任务<br>任务将由追更检查或手动下发</div>';
+            $('task-count').textContent = '0';
+            return 0;
+        }
+        var html = '';
+        tasks.forEach(function (t) {
+            var st = t.status || 'pending';
+            if (st === 'running') running++;
+            var type = t.type || 'download';
+            var tname = t.name || (t.chase_id ? '追更任务' : '传输任务');
+            var ep = t.ep_num ? ' 第' + t.ep_num + '集' : '';
+            var prog = t.progress !== undefined ? Math.round(t.progress) : (st === 'running' ? 40 : (st === 'done' ? 100 : 0));
+            var poller = t.polled_by || '';
+            var msg = t.result_msg || '';
+            var statusCls = ['pending', 'running', 'done', 'error', 'cancelled'].indexOf(st) >= 0 ? st : 'pending';
+            html += '<div class="task-card">' +
+                '<div class="task-top">' +
+                '<div class="task-icon ' + (TYPE_CLASS[type] || 'download') + '">' + (TYPE_ICON[type] || '传') + '</div>' +
+                '<div class="task-body">' +
+                '<div class="task-name">' + esc(tname) + esc(ep) + '</div>' +
+                '<div class="task-meta">' +
+                '<span class="tag">' + esc(TYPE_TEXT[type] || type) + '</span>' +
+                (poller ? '<span class="tag">' + esc(poller) + '</span>' : '') +
+                '</div>' +
+                '</div>' +
+                '<span class="task-status ' + statusCls + '">' + (STATUS_TEXT[st] || st) + '</span>' +
+                '</div>' +
+                '<div class="task-progress-bar"><div class="fill ' + (st === 'done' ? 'done' : (st === 'error' ? 'error' : '')) + '" style="width:' + prog + '%"></div></div>' +
+                (msg ? '<div class="task-msg">' + esc(msg) + '</div>' : '') +
+                '<div class="task-foot">' +
+                '<span>' + fmtTime(t.created_at) + (t.finished_at ? ' → ' + fmtTime(t.finished_at) : '') + '</span>' +
+                '<span>' + (st === 'running' ? (t.started_at ? ago(t.started_at) : '进行中') : '') + '</span>' +
+                '</div>' +
+                '</div>';
+        });
+        box.innerHTML = html;
+        $('task-count').textContent = tasks.length;
+        return running;
+    }
+
+    function renderStats(online, running, total) {
+        $('stat-clients').textContent = online;
+        $('stat-running').textContent = running;
+        $('stat-total').textContent = total;
+    }
+
+    /* ── 追更页渲染（★10） ── */
+    function alertClass(a) {
+        if (a === 'danger') return 'danger';
+        if (a === 'warn' || a === 'warning') return 'warn';
+        return 'ok';
+    }
+    function renderChase(list) {
+        var box = $('chase-list');
+        $('chase-count').textContent = (list || []).length;
+        $('badge-chase').style.display = 'none';
+        if (!list || !list.length) {
+            box.innerHTML = '<div class="empty"><div class="big">🎬</div>暂无追更配置<br>请在管理后台添加</div>';
+            return;
+        }
+        var html = '';
+        var dangerCnt = 0;
+        list.forEach(function (c) {
+            var a = c.alert_level || 'ok';
+            var ac = alertClass(a);
+            if (ac === 'danger') dangerCnt++;
+            var stopped = c.stopped ? true : false;
+            var name = c.name || c.chase_id || '未命名';
+            var ep = c.latest_ep_num ? ('第 ' + c.latest_ep_num + ' 集') : (c.latest_ep ? esc(c.latest_ep) : '—');
+            var have = c.have_episodes ? c.have_episodes.length : 0;
+            var miss = c.missing_episodes ? c.missing_episodes.length : 0;
+            var checked = c.last_checked_at ? fmtTime(c.last_checked_at) + ' (' + ago(c.last_checked_at) + ')' : '从未检查';
+            var pct = (have + miss) > 0 ? Math.round(have / (have + miss) * 100) : 0;
+            var statePill = stopped
+                ? '<span class="alert-pill" style="background:rgba(239,68,68,0.13);color:var(--red)">已停止</span>'
+                : '<span class="alert-pill ' + ac + '">' + (ALERT_TEXT[ac] || ac) + '</span>';
+            var actBtns = '<button class="btn primary" data-check="' + esc(c.chase_id) + '">手动检查</button>';
+            if (stopped) {
+                actBtns += '<button class="btn text" data-reset="' + esc(c.chase_id) + '">↺ 重置</button>';
+            } else {
+                actBtns += '<button class="btn text danger" data-stop="' + esc(c.chase_id) + '">⏹ 停止</button>';
+            }
+            html += '<div class="chase-card">' +
+                '<div class="chase-top">' +
+                '<div class="chase-name">' + esc(name) + (c.chase_id ? '<div class="sub">' + esc(c.chase_id) + '</div>' : '') + '</div>' +
+                statePill +
+                '</div>' +
+                '<div class="chase-progress-row">' +
+                '<span class="have">已存 ' + have + '</span>' +
+                '<span class="miss">缺失 ' + miss + '</span>' +
+                (ep !== '—' ? '<span class="latest">最新 ' + esc(ep) + '</span>' : '') +
+                '</div>' +
+                '<div class="chase-progress-bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+                '<div class="chase-foot">🕒 ' + esc(checked) + '</div>' +
+                '<div class="chase-actions">' + actBtns + '</div>' +
+                '</div>';
+        });
+        box.innerHTML = html;
+        if (dangerCnt > 0) {
+            $('badge-chase').textContent = dangerCnt;
+            $('badge-chase').style.display = 'block';
+        }
+        Array.prototype.forEach.call(box.querySelectorAll('[data-check]'), function (b) {
+            b.addEventListener('click', function () { checkChase(b.getAttribute('data-check'), b); });
+        });
+        Array.prototype.forEach.call(box.querySelectorAll('[data-stop]'), function (b) {
+            b.addEventListener('click', function () { stopChase(b.getAttribute('data-stop'), b); });
+        });
+        Array.prototype.forEach.call(box.querySelectorAll('[data-reset]'), function (b) {
+            b.addEventListener('click', function () { resetChase(b.getAttribute('data-reset'), b); });
+        });
+    }
+
+    function stopChase(cid, btn) {
+        if (!cid) return;
+        if (btn) { btn.disabled = true; btn.textContent = '停止中…'; }
+        fetch('/api/admin/chase/' + encodeURIComponent(cid) + '/stop', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { toast(j.success ? ('已完全停止：' + cid) : ('停止失败：' + (j.message || '未知'))); })
+            .catch(function () { toast('网络错误'); })
+            .then(function () { loadChase(); });
+    }
+
+    function resetChase(cid, btn) {
+        if (!cid) return;
+        if (btn) { btn.disabled = true; btn.textContent = '重置中…'; }
+        fetch('/api/admin/chase/' + encodeURIComponent(cid) + '/reset', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { toast(j.success ? ('已重置（可重新运行）：' + cid) : ('重置失败：' + (j.message || '未知'))); })
+            .catch(function () { toast('网络错误'); })
+            .then(function () { loadChase(); });
+    }
+
+    function checkChase(cid, btn) {
+        if (!cid) return;
+        if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+        fetch('/api/admin/chase/' + encodeURIComponent(cid) + '/check', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                if (j.success) {
+                    toast('已触发检查：' + (j.message || cid));
+                } else {
+                    toast('检查失败：' + (j.message || '未知错误'));
+                }
+            })
+            .catch(function () { toast('网络错误，请重试'); })
+            .then(function () {
+                if (btn) { btn.disabled = false; btn.textContent = '手动检查'; }
+                loadChase();
+            });
+    }
+
+    /* ── 下载管理页（★10） ── */
+    function renderDownload(clients) {
+        var box = $('dl-list');
+        var now = Date.now() / 1000;
+        var totalTasks = 0;
+        if (!clients || !clients.length) {
+            box.innerHTML = '<div class="empty"><div class="big">⬇️</div>暂无客户端在线</div>';
+            $('dl-count').textContent = '0';
+            $('badge-dl').style.display = 'none';
+            return;
+        }
+        var html = '';
+        clients.forEach(function (c) {
+            var on = isOnline(c, now);
+            var tasks = (c.running_tasks && c.running_tasks.length) ? c.running_tasks : [];
+            totalTasks += tasks.length;
+            var clientName = c.client_name || '未命名客户端';
+            html += '<div class="dl-client">';
+            html += '<div class="dl-client-name"><span class="dot" style="background:' + (on ? 'var(--green)' : 'var(--gray)') + '"></span>' + esc(clientName) + '</div>';
+            if (!tasks.length) {
+                html += '<div class="dl-task" style="color:var(--text3);font-size:12px;padding:8px 12px">当前无进行中的下载</div>';
+            } else {
+                tasks.forEach(function (t) {
+                    var pct = t.progress !== undefined ? Math.round(t.progress) : 0;
+                    var spd = t.speed ? t.speed : '';
+                    var size = (t.total ? fmtSize(t.total) : '');
+                    var cid = t.chase_id || '';
+                    html += '<div class="dl-task">' +
+                        '<div class="dl-task-top">' +
+                        '<div class="dl-task-name">' + esc(t.name || '下载任务') + (t.ep_num ? ' 第' + t.ep_num + '集' : '') + '</div>' +
+                        '<div class="dl-task-pct">' + pct + '%</div>' +
+                        '</div>' +
+                        '<div class="dl-task-bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+                        '<div class="dl-task-meta">' +
+                        (spd ? '<span>速度 ' + esc(spd) + '</span>' : '') +
+                        (size ? '<span>大小 ' + esc(size) + '</span>' : '') +
+                        (t.stage ? '<span>' + esc(t.stage) + '</span>' : '') +
+                        '</div>' +
+                        (cid ? '<button class="dl-task-btn" data-stop="' + esc(cid) + '">停止此下载</button>' : '') +
+                        '</div>';
+                });
+            }
+            html += '</div>';
+        });
+        box.innerHTML = html;
+        $('dl-count').textContent = totalTasks;
+        if (totalTasks > 0) {
+            $('badge-dl').textContent = totalTasks;
+            $('badge-dl').style.display = 'block';
+        } else {
+            $('badge-dl').style.display = 'none';
+        }
+        Array.prototype.forEach.call(box.querySelectorAll('[data-stop]'), function (b) {
+            b.addEventListener('click', function () { stopDownload(b.getAttribute('data-stop'), b); });
+        });
+    }
+
+    function fmtSize(bytes) {
+        if (!bytes) return '';
+        var u = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var i = 0;
+        var n = bytes;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+    }
+
+    function stopDownload(cid, btn) {
+        if (!cid) return;
+        if (btn) { btn.disabled = true; btn.textContent = '停止中…'; }
+        fetch('/api/admin/chase/' + encodeURIComponent(cid) + '/stop', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                toast(j.success ? ('已停止：' + cid) : ('停止失败：' + (j.message || '未知')));
+            })
+            .catch(function () { toast('网络错误'); })
+            .then(function () { loadDownload(); });
+    }
+
+    /* ── 日志页（★11） ── */
+    function renderLog(logs) {
+        var box = $('log-list');
+        if (!logs || !logs.length) {
+            box.innerHTML = '<div class="log-empty">暂无日志' + (logQuery ? '（当前筛选下）' : '') + '</div>';
+            return;
+        }
+        var html = '';
+        logs.forEach(function (l) {
+            var lv = (l.level || 'INFO').toLowerCase();
+            var cls = ['debug', 'info', 'warning', 'error', 'critical'].indexOf(lv) >= 0 ? lv : 'info';
+            var d = new Date((l.t || 0) * 1000);
+            function p(n) { return (n < 10 ? '0' : '') + n; }
+            var ts = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+            html += '<div class="log-item ' + cls + '">' +
+                '<span class="ts">' + ts + '</span>' +
+                '<span class="lv">[' + (l.level || 'INFO') + ']</span>' +
+                '<span class="msg">' + esc(l.msg) + '</span>' +
+                '</div>';
+        });
+        box.innerHTML = html;
+    }
+
+    function loadLog() {
+        var url = '/api/admin/log?level=' + encodeURIComponent(logLevel) + '&limit=300';
+        if (logQuery) url += '&q=' + encodeURIComponent(logQuery);
+        fetch(url)
+            .then(function (r) { if (r.status === 401) return null; return r.json(); })
+            .then(function (j) {
+                if (!j) return;
+                logTotal = j.total || 0;
+                renderLog(j.logs);
+            })
+            .catch(function () {});
+    }
+
+    /* ── 数据加载 ── */
+    function showLogin() {
+        $('login-overlay').classList.remove('hidden');
+        $('login-user').focus();
+    }
+    function hideLogin() {
+        $('login-overlay').classList.add('hidden');
+    }
+
+    function loadMonitor() {
+        var online = 0, running = 0, total = 0;
+        var clients = [], tasks = [];
+        var done = 0, step = 2, needLogin = false;
+        var serverVer = '';
+        fetch('/api/status').then(function (r) { return r.json(); }).then(function (j) { serverVer = j.server || ''; }).catch(function () {});
+        function maybeFinish() {
+            done++;
+            if (done < step) return;
+            if (needLogin) { showLogin(); setConn(false, '需要登录'); return; }
+            hideLogin();
+            renderStats(online, running, total);
+            setConn(true, '已连接');
+            $('footer-time').textContent = '更新于 ' + new Date().toLocaleTimeString();
+            $('sub-info').textContent = '服务端 ' + (serverVer || '') + ' · 自动刷新';
+        }
+        fetch('/api/admin/clients')
+            .then(function (r) { if (r.status === 401) { needLogin = true; return null; } return r.json(); })
+            .then(function (j) { if (j) { clients = j.clients || []; online = renderClients(clients); } })
+            .catch(function () { setConn(false, '连接失败'); }).then(maybeFinish);
+        fetch('/api/admin/client/tasks')
+            .then(function (r) { if (r.status === 401) { needLogin = true; return null; } return r.json(); })
+            .then(function (j) { if (j) { tasks = (j.tasks || []); total = tasks.length; running = renderTasks(tasks); } })
+            .catch(function () { setConn(false, '连接失败'); }).then(maybeFinish);
+    }
+
+    function loadChase() {
+        fetch('/api/admin/chase')
+            .then(function (r) {
+                if (r.status === 401) { showLogin(); return null; }
+                return r.ok ? r.json() : null;
+            })
+            .then(function (j) {
+                if (!j) return;
+                // 自适应：列表可能直接是数组或含 .items/.chases 字段
+                var list = j;
+                if (!Array.isArray(j)) list = (j.items || j.chases || j.data || []);
+                renderChase(list);
+            })
+            .catch(function () {});
+    }
+
+    function loadDownload() {
+        fetch('/api/admin/clients')
+            .then(function (r) {
+                if (r.status === 401) { showLogin(); return null; }
+                return r.ok ? r.json() : null;
+            })
+            .then(function (j) {
+                if (!j) return;
+                renderDownload(j.clients || []);
+            })
+            .catch(function () {});
+    }
+
+    function loadCurrent() {
+        if (currentTab === 'monitor') loadMonitor();
+        else if (currentTab === 'chase') loadChase();
+        else if (currentTab === 'download') loadDownload();
+        else if (currentTab === 'log') loadLog();
+    }
+
+    function refresh(force) {
+        loadCurrent();
+        schedule();
+    }
+
+    function schedule() {
+        clearTimeout(timer);
+        timer = setTimeout(function () { if (!document.hidden) loadCurrent(); schedule(); }, REFRESH_MS);
+    }
+
+    function setConn(ok, text) {
+        var dot = $('conn-dot');
+        dot.className = 'conn-dot ' + (ok ? 'on' : 'off');
+        $('conn-text').textContent = text || (ok ? '已连接' : '未连接');
+    }
+
+    /* ── 登录 ── */
+    function doLogin() {
+        var user = $('login-user').value.trim();
+        var pass = $('login-pass').value;
+        var btn = $('login-btn');
+        var err = $('login-err');
+        if (!user || !pass) { err.textContent = '请输入用户名和密码'; return; }
+        btn.disabled = true; err.textContent = '';
+        fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user, password: pass })
+        }).then(function (r) { return r.json(); }).then(function (j) {
+            if (j.success) { hideLogin(); refresh(true); }
+            else { err.textContent = j.message || '登录失败'; }
+        }).catch(function () { err.textContent = '网络错误，请检查连接'; }).then(function () { btn.disabled = false; });
+    }
+
+    /* ── Tab 切换 ── */
+    function switchTab(name) {
+        currentTab = name;
+        Array.prototype.forEach.call(document.querySelectorAll('.tab-item'), function (el) {
+            el.classList.toggle('active', el.getAttribute('data-tab') === name);
+        });
+        Array.prototype.forEach.call(document.querySelectorAll('.page'), function (el) {
+            el.classList.toggle('active', el.id === 'page-' + name);
+        });
+        refresh(true);
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('.tab-item'), function (el) {
+        el.addEventListener('click', function () { switchTab(el.getAttribute('data-tab')); });
+    });
+
+    /* ── 刷新按钮 ── */
+    $('btn-refresh-mon').addEventListener('click', function () { loadMonitor(); });
+    $('btn-refresh-chase').addEventListener('click', function () { loadChase(); });
+    $('btn-refresh-dl').addEventListener('click', function () { loadDownload(); });
+
+    /* ── 日志筛选 ── */
+    Array.prototype.forEach.call($('log-levels').querySelectorAll('.log-level'), function (el) {
+        el.addEventListener('click', function () {
+            Array.prototype.forEach.call($('log-levels').querySelectorAll('.log-level'), function (x) { x.classList.remove('active'); });
+            el.classList.add('active');
+            logLevel = el.getAttribute('data-lv');
+            loadLog();
+        });
+    });
+    var searchTimer = null;
+    $('log-search').addEventListener('input', function () {
+        clearTimeout(searchTimer);
+        var v = this.value.trim();
+        searchTimer = setTimeout(function () { logQuery = v; loadLog(); }, 250);
+    });
+
+    /* ── 下拉刷新 ── */
+    (function () {
+        var startY = null;
+        document.addEventListener('touchstart', function (e) {
+            if (window.scrollY <= 0) startY = e.touches[0].clientY;
+        }, { passive: true });
+        document.addEventListener('touchmove', function (e) {
+            if (startY !== null && e.touches[0].clientY - startY > 60) $('pull-hint').textContent = '松开刷新…';
+        }, { passive: true });
+        document.addEventListener('touchend', function () {
+            if (startY !== null) { $('pull-hint').textContent = '下拉刷新'; refresh(true); startY = null; }
+        });
+    })();
+
+    /* ── 事件 ── */
+    $('btn-refresh-mon').addEventListener('click', function () { loadMonitor(); });
+    $('login-btn').addEventListener('click', doLogin);
+    $('login-pass').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+    $('login-user').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('login-pass').focus(); });
+
+    /* ── 启动 ── */
+    loadMonitor();
+    schedule();
+
+    // Service Worker 注册（PWA 离线支持）
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/admin/sw.js').catch(function () {});
+    }
+})();
+</script>
+</body>
+</html>

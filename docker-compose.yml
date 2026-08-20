@@ -1,0 +1,11 @@
+services:
+  wps-cloud:
+    image: ghcr.io/chenda147/wps-cloud:latest
+    container_name: wps-cloud
+    restart: unless-stopped
+    ports:
+      - '58000:58000'
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - /vol1/1000/media:/app/media

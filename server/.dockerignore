@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.git/
+.vscode/
+.idea/
+data/*
+!data/.gitkeep
+temp_downloads/
+strm_output/
+client/
+*.har
+*.png
+*.bat
+.DS_Store
+Thumbs.db
