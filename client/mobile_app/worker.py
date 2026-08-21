@@ -418,6 +418,7 @@ class ClientWorker:
     # ── 普通任务 ──
 
     def _exec_normal_task(self, session, url, task):
+        cfg = load_config()
         share_url = task.get("share_url", "")
         share_pwd = task.get("share_passwd", "")
         rename_to = task.get("rename_to", "") or task.get("name", "")
@@ -525,6 +526,7 @@ class ClientWorker:
         if task.get("batch") and task.get("files"):
             self._exec_chase_batch(session, url, task)
             return
+        cfg = load_config()
         chase_id = task.get("chase_id", "")
         share_url = task.get("share_url", "")
         share_pwd = task.get("share_passwd", "")
@@ -626,6 +628,7 @@ class ClientWorker:
         下载 1 → 上传 1 的同时并行下载 2 → 1 上传完上传 2，同时下载 3……
         每集完成后单独上报追更进度（chase_done），服务端据此更新卡片进度。
         """
+        cfg = load_config()
         chase_id = task.get("chase_id", "")
         share_url = task.get("share_url", "")
         share_pwd = task.get("share_passwd", "")
