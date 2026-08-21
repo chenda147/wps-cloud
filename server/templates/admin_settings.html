@@ -2950,7 +2950,7 @@ function renderChaseCards() {
         const nextCheckRel = t.next_check ? relTime(t.next_check) : escHtml(schedLabel);
         const lastSuccess = t.last_success_ts ? `<span class="cl-last"><i class="fa-solid fa-check" style="color:#22c55e;font-size:10px;"></i>${escHtml(relTime(t.last_success_ts))}</span>` : '';
         const warnBadge = (t.warn_level === 'error')
-            ? `<span class="cl-warn" title="${escHtml(t.last_error||'')}">${escHtml({cookie_invalid:'Cookie失效',share_invalid:'链接失效',rate_limited:'限流',network:'网络异常',other:'异常'}.get(t.last_error_type,'失败'))}</span>`
+            ? `<span class="cl-warn" title="${escHtml(t.last_error||'')}">${escHtml({cookie_invalid:'Cookie失效',share_invalid:'链接失效',rate_limited:'限流',network:'网络异常',other:'异常'}[t.last_error_type] || '失败')}</span>`
             : (t.warn_level === 'warn' ? `<span class="cl-warn cl-warn-y">失败${t.consecutive_failures||0}次</span>` : '');
         // 分享链接状态角标：检查成功→有效(绿)，失败→失效(红)，未检测→灰。
         // 每 N 小时=1H 时每次检查都会刷新，即每小时更新一次
