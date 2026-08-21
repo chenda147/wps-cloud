@@ -385,7 +385,7 @@ def _global_video_exts():
 def _global_video_exts_str():
     """下发到客户端的视频格式白名单（逗号分隔字符串）"""
     return ",".join(_global_video_exts())
-_SVR_CHECK_RUNNING = {}  # chase_id → True，服务端追更检查去重
+_SVR_CHECK_RUNNING = {}  # chase_id → 启动时间戳(epoch秒)，服务端追更检查去重（带超时，防卡死残留）
 
 def _create_chase_check_task(chase, manual=False):
     """触发一次追更检查（服务端后台执行，不再下发客户端检查任务）。
@@ -395,10 +395,19 @@ def _create_chase_check_task(chase, manual=False):
     if not chase or not chase.get("id"):
         return None
     cid = chase["id"]
-    # ── 去重：同一追更已有检查在跑时不重复触发 ──
-    if _SVR_CHECK_RUNNING.get(cid):
+    cname = chase.get("name", "追更")
+    # ── 去重（带超时）：同一追更已有检查在跑时不重复触发。
+    # 网络探测(分享浏览/WPS目录)慢时检查线程可能持续数分钟；若无超时，
+    # 一旦旧线程卡住未结束，_SVR_CHECK_RUNNING 残留 → 后续所有手动/自动
+    # 检查全被挡掉 → 点「运行」毫无反应。超过 CHECK_TIMEOUT 视为卡死，
+    # 允许重新触发（新线程接管，旧线程最终自行结束并清理）。
+    _CHECK_TIMEOUT = 300  # 秒：正常检查应在此时间内完成
+    _last = _SVR_CHECK_RUNNING.get(cid, 0)
+    if _last and time.time() - _last < _CHECK_TIMEOUT:
+        logger.info(f"追更检查[{cname}] 已有检查进行中({int(time.time()-_last)}s)，本次触发跳过")
         return None
-    _SVR_CHECK_RUNNING[cid] = True
+    _SVR_CHECK_RUNNING[cid] = time.time()
+    logger.info(f"追更检查[{cname}] 触发检查 manual={manual}")
     threading.Thread(
         target=_run_server_chase_check, args=(chase, manual), daemon=True).start()
     return None
@@ -411,9 +420,13 @@ def _run_server_chase_check(chase, manual=False):
     """
     cid = chase.get("id", "")
     cname = chase.get("name", "追更")
+    _ck_ts = _SVR_CHECK_RUNNING.get(cid, 0)  # 记录本次检查的标记时间戳，结束时按值清理
     # ── 已停止的追更：即使检查在停止前已被触发，也立即退出，不再浏览/派发 ──
     if chase.get("stopped"):
         logger.info(f"追更检查[{cname}] 追更已停止，跳过检查")
+        # 该 return 在 try 外，finally 不会执行，必须手动清理去重标记，防止残留阻塞后续检查
+        if _SVR_CHECK_RUNNING.get(cid) == _ck_ts:
+            _SVR_CHECK_RUNNING.pop(cid, None)
         return
     try:
         # ── 与下载任务一致的 WPS 目标路径，并持久化到追更任务 ──
@@ -433,7 +446,12 @@ def _run_server_chase_check(chase, manual=False):
         files, err = _server_browse_chase_share(share_url, share_pwd, sub_path)
         if err:
             logger.info(f"追更检查[{cname}] 分享浏览失败: {err}")
-            _submit_server_chase_result(cid, {"episodes": [], "error": err})
+            # 即使分享浏览失败，也探测 WPS 目录校准 wps_eps（WPS 实际文件快照）。
+            # 否则 wps_eps 一直为空 → 前端「已传」退化 done_eps 虚高、
+            # 漏集判定误把缺失集当已存在，点开始也收不到下载任务。
+            _wp_probe = _server_probe_wps_dir(_wps_path0)
+            _submit_server_chase_result(cid, {"episodes": [], "error": err,
+                                              "wps_files": _wp_probe})
             return
 
         # ── 2. 格式 + 大小过滤（与客户端原检查逻辑一致）──
@@ -524,6 +542,17 @@ def _run_server_chase_check(chase, manual=False):
             logger.info(f"追更检查[{cname}]: 共{len(files)}个文件, 发现{len(new)}个新集数: {new[:10]}")
             wps_files = _server_probe_wps_dir(_wps_path0)
             logger.info(f"追更检查[{cname}]: WPS目录探测: {_wps_path0} 共{len(wps_files)}个文件")
+            # ── 自动查缺失补档：WPS 实际缺失、但分享源存在的集并入本次派发 ──
+            # 覆盖"WPS 没有但分享链接里有"的漏传/缺集场景（如历史 done_eps 虚高
+            # 导致 5-30 被误判已存在）。以 WPS 实际文件快照为准，不信任 done_eps。
+            if wps_files:
+                _miss = _auto_backfill_missing(cid, all_eps, wps_files,
+                                               ep_pattern, is_movie)
+                if _miss:
+                    _miss_sorted = sorted(_miss)
+                    new = sorted(set(new) | _miss)
+                    logger.info(f"追更检查[{cname}]: 查缺失补档新增 {len(_miss)} 个缺失集"
+                                f"(分享有/WPS无): {_miss_sorted[:10]}，本次派发 {len(new)} 集")
             _submit_server_chase_result(cid, {
                 "episodes": new, "siblings": all_eps, "wps_files": wps_files})
     except Exception as e:
@@ -533,7 +562,10 @@ def _run_server_chase_check(chase, manual=False):
         except Exception:
             pass
     finally:
-        _SVR_CHECK_RUNNING.pop(cid, None)
+        # 仅当仍标记为自己发起的时间戳才清理，避免误删超时后重新触发的新检查标记
+        if _SVR_CHECK_RUNNING.get(cid) == _ck_ts:
+            _SVR_CHECK_RUNNING.pop(cid, None)
+        logger.info(f"追更检查[{cname}] 检查结束")
 
 
 def _is_ep_number(k, check_from):
@@ -545,6 +577,54 @@ def _is_ep_number(k, check_from):
     if ep <= check_from or (1900 <= ep <= 2100):
         return False
     return True
+
+
+def _auto_backfill_missing(cid, all_eps, wps_files, ep_pattern="", is_movie=False):
+    """自动查缺失补档：以 WPS 实际文件快照为准，找出「分享源有、WPS 无」的集号。
+
+    同时（与手动「查缺失」接口一致）在锁内把追更任务的 wps_eps/done_eps 校准为
+    WPS 实际快照——否则 done_eps 虚高（上传路径异常/文件被移走，记录在案但 WPS
+    实际无文件）会在 _process_chase_result_locked 的并集判定(wps_eps|done_eps)中
+    永久挡住缺失集补追（表现为"缺失集不派发，只派最后一集"）。
+
+    wps_files 为空（探测失败或目录真空）时返回空集，避免把全部集误判为缺失全推。
+    """
+    if not wps_files:
+        return set()
+    present = set()
+    for fn in wps_files:
+        ep, _ = _server_extract_episode(fn, ep_pattern, is_movie=is_movie)
+        if ep is not None:
+            try:
+                present.add(int(ep))
+            except (ValueError, TypeError):
+                pass
+    # 校准任务快照（锁内写回）
+    if cid:
+        try:
+            with _CHASE_FILE_LOCK:
+                _tasks2 = _load_chase()
+                for _t2 in _tasks2:
+                    if _t2.get("id") == cid:
+                        _t2["wps_eps"] = sorted(present)
+                        _de = set(int(x) for x in (_t2.get("done_eps") or []))
+                        _de &= present
+                        _t2["done_eps"] = sorted(_de)
+                        _save_chase(_tasks2)
+                        break
+        except Exception:
+            pass
+    missing = set()
+    for k in all_eps:
+        try:
+            ep = int(k)
+        except (ValueError, TypeError):
+            continue
+        if ep <= 0 or (1900 <= ep <= 2100):  # 电影负号/年份误判排除
+            continue
+        if ep not in present:
+            missing.add(ep)
+    return missing
 
 
 def _persist_chase_wps_path(chase, cid, cname):
@@ -924,6 +1004,22 @@ def _build_chase_file_info(chase, ep_num, siblings=None, manual=None):
         season_from_file = re.search(r'[Ss](\d{2})', file_name)
     if season_from_file:
         season = int(season_from_file.group(1))
+    else:
+        # ③ 文件无季标记（如 "01.mp4"/"第01集.mp4"）：
+        #    优先取「指定集数」中的唯一季（如 S02E01-S02E08 → 2）；
+        #    否则默认 S01 —— 与预览 test_pattern/preview_files 保持一致，
+        #    避免模板渲染出 S00、WPS 落到根目录，与同季其他文件（Season 1）不一致。
+        try:
+            _ef = (chase.get("episodes_filter") or "").strip()
+            if _ef:
+                _wm = parse_episodes_filter(_ef)
+                _slist = sorted(k for k in _wm if k > 0)
+                if len(_slist) == 1:
+                    season = _slist[0]
+        except Exception:
+            pass
+        if season <= 0:
+            season = 1
     tmdb_id = chase.get("tmdb_id", "")
     # 处理 {name}、{season}、{tmdb_id} 占位符
     year = chase.get("year", "")
@@ -1272,6 +1368,7 @@ __all__ = [
     "_trigger_strm_for_chase",
     "_trigger_strm_task",
     "_create_chase_download_task",
+    "_create_chase_download_batch_tasks",
     "_get_all_yidong_accounts",
     "_get_all_quark_accounts",
     "_browse_share_recursive",

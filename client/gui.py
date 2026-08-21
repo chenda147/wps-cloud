@@ -646,6 +646,7 @@ class App:
         self._log(f"已连接 {url}，客户端: {client_name}，并发: {max_conc}，开始轮询")
         self._srv_status(f"轮询中({max_conc}并发)", self.成功色)
         self._srv_session = session; self._srv_url = url
+        _fail_count = 0  # 连续失败次数：连接异常按 15→30→60s 指数退避重试，避免服务端恢复前请求风暴
         while not self._srv_stop.is_set():
             try:
                 # 统计当前活跃任务数
@@ -670,7 +671,7 @@ class App:
                           "running_tids": running_ids,
                           "version": CLIENT_VERSION,
                           "cloud_types": cloud_types}
-                r = session.get(f"{url}/api/client/poll", params=params, timeout=15)
+                r = session.get(f"{url}/api/client/poll", params=params, timeout=(10, 30))
                 if r.status_code == 200:
                     data = r.json()
                     # ── 处理取消指令 ──
@@ -708,9 +709,12 @@ class App:
                 else:
                     self._log(f"服务器返回 {r.status_code}")
                     self._srv_status(f"错误({r.status_code})重试中", '#FFB900')
+                    _fail_count += 1
                     self._srv_stop.wait(10)
             except ProxyError:
-                self._log(f"代理连接失败，切换到直连模式，30秒后重试...")
+                _fail_count += 1
+                _delay = min(30 * _fail_count, 60)  # 30→60s 退避
+                self._log(f"代理连接失败，切换到直连模式，{_delay}秒后重试...")
                 self._srv_status("代理错误(直连重试)", '#FFB900')
                 # 重建 session，绕过系统代理
                 session.close()
@@ -723,18 +727,21 @@ class App:
                     self._srv_session = None; self._srv_url = ""
                     return
                 self._srv_session = session; self._srv_url = url
-                self._srv_stop.wait(30)
+                self._srv_stop.wait(_delay)
             except ConnectionError:
-                self._log(f"连接失败，15秒后重试...")
+                _fail_count += 1
+                _delay = min(15 * (2 ** (_fail_count - 1)), 60)  # 15→30→60s 指数退避
+                self._log(f"连接失败，{_delay}秒后重试...")
                 self._srv_status("连接失败(重试中)", '#FFB900')
-                self._srv_stop.wait(15)
-                # 连接恢复后更新状态
-                if not self._srv_stop.is_set():
-                    self._srv_status(f"轮询中({max_conc}并发)", self.成功色)
+                self._srv_stop.wait(_delay)
             except Exception as e:
-                self._log(f"轮询出错: {e}")
-                self._srv_stop.wait(5)
+                _fail_count += 1
+                _delay = min(10 * (2 ** (_fail_count - 1)), 60)  # 10→20→40→60s 指数退避
+                self._log(f"轮询出错: {e}，{_delay}秒后重试")
+                self._srv_stop.wait(_delay)
             else:
+                _fail_count = 0
+                self._srv_status(f"轮询中({max_conc}并发)", self.成功色)  # 成功轮询才恢复状态
                 self._srv_stop.wait(5)  # 成功轮询后也等待
         self._log("轮询已停止")
         self._srv_status("已断开", '#848D97')

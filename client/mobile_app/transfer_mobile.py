@@ -1,8 +1,9 @@
 """
 手机版传输引擎：139/夸克分享下载 → 本地存储 → WPS上传
 移植自 PC 版 transfer_engine.py，针对 Android/Kivy 环境改造：
-- 去掉 7z.exe / UnRAR.exe 子进程依赖，全部用纯 Python 解压（zipfile/tarfile/py7zr）
-- RAR 格式不支持（Android 无 UnRAR 二进制），解压失败时明确提示
+- 7z/rar/zip 解压优先调用 APK 内打包的 7zz 静态二进制（7-Zip 26.02 arm64 静态版），
+  zip/tar 同时保留标准库（zipfile/tarfile）兜底，7z 可用 py7zr 兜底
+- RAR 解压依赖 7zz（7-Zip 可解 RAR4/RAR5），未找到 7zz 时明确提示
 - 下载/上传逻辑与 PC 版一致（流式下载、WPS 多级路径、重命名、断点续传）
 """
 import os
@@ -10,6 +11,7 @@ import time
 import shutil
 import zipfile
 import tarfile
+import subprocess
 import threading
 import queue as _queue
 import requests
@@ -434,8 +436,43 @@ class TransferEngine:
         return False
 
     @staticmethod
+    def _find_7zz():
+        """定位 APK 内打包的 7zz 静态二进制（用于解压 7z/rar/zip）。
+        查找顺序：应用目录 tools/7zz → 脚本同目录 7zz → ANDROID_PRIVATE → 系统 PATH。"""
+        cands = []
+        here = os.path.dirname(os.path.abspath(__file__))
+        cands.append(os.path.join(here, "tools", "7zz"))
+        cands.append(os.path.join(here, "7zz"))
+        private = os.environ.get("ANDROID_PRIVATE", "")
+        if private:
+            cands.append(os.path.join(private, "files", "app", "tools", "7zz"))
+            cands.append(os.path.join(private, "files", "app", "7zz"))
+        for c in cands:
+            if os.path.isfile(c):
+                try:
+                    os.chmod(c, 0o755)
+                except Exception:
+                    pass
+                return c
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            p = os.path.join(d, "7zz")
+            if os.path.isfile(p):
+                return p
+        return ""
+
+    @staticmethod
+    def _extract_with_7zz(seven_path, archive_path, extract_dir):
+        """调用 `7zz x` 解压（支持 7z/rar/zip 等）。成功返回 True。"""
+        try:
+            cmd = [seven_path, "x", archive_path, f"-o{extract_dir}", "-y"]
+            sub = subprocess.run(cmd, capture_output=True, timeout=1800)
+            return sub.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
     def _extract_and_find_videos(archive_path, progress_cb=None, _depth=0):
-        """纯 Python 解压压缩包并返回其中的视频文件列表（支持嵌套递归）。
+        """解压压缩包并返回其中的视频文件列表（支持嵌套递归）。
         Returns: (video_files, error, extract_dir)
         """
         if _depth > 3:
@@ -452,14 +489,28 @@ class TransferEngine:
             name_lower = archive_name.lower()
             ext = os.path.splitext(archive_name)[1].lower()
 
-            # ── ZIP ──
+            # ── ZIP（标准库优先，失败用 7zz 兜底）──
             if name_lower.endswith('.zip') or ext == '.zip':
-                with zipfile.ZipFile(archive_path, 'r') as zf:
-                    for member in zf.infolist():
-                        member_path = os.path.normpath(member.filename)
-                        if member_path.startswith('..') or os.path.isabs(member_path):
-                            continue
-                    zf.extractall(extract_dir)
+                zip_ok = False
+                try:
+                    with zipfile.ZipFile(archive_path, 'r') as zf:
+                        for member in zf.infolist():
+                            member_path = os.path.normpath(member.filename)
+                            if member_path.startswith('..') or os.path.isabs(member_path):
+                                continue
+                        zf.extractall(extract_dir)
+                    zip_ok = True
+                except Exception:
+                    zip_ok = False
+                if not zip_ok:
+                    seven = TransferEngine._find_7zz()
+                    if seven and TransferEngine._extract_with_7zz(
+                            seven, archive_path, extract_dir):
+                        if progress_cb:
+                            progress_cb("extract", 0, 0, "zipfile 失败，改用 7zz 解压成功")
+                        zip_ok = True
+                if not zip_ok:
+                    return [], "zip 解压失败（标准库与 7zz 均失败，可能加密或已损坏）", extract_dir
 
             # ── TAR ──
             elif name_lower.endswith(('.tar', '.tar.gz', '.tar.bz2', '.tar.xz',
@@ -490,22 +541,39 @@ class TransferEngine:
                 if not tar_ok:
                     return [], "解压失败: tarfile 所有模式均失败", extract_dir
 
-            # ── 7z (py7zr) ──
+            # ── 7z（7zz 二进制优先，py7zr 兜底）──
             elif ext == '.7z':
-                try:
-                    import py7zr
-                except ImportError:
-                    return [], "解压失败: 缺少 py7zr 库（无法解压 .7z 文件）", extract_dir
-                try:
-                    with py7zr.SevenZipFile(archive_path, 'r', password='') as zf:
-                        zf.extractall(extract_dir)
-                except Exception as e:
-                    return [], f"7z 解压失败: {e}", extract_dir
+                seven = TransferEngine._find_7zz()
+                seven_ok = False
+                if seven:
+                    if progress_cb:
+                        progress_cb("extract", 0, 0, "正在用 7zz 解压 .7z ...")
+                    seven_ok = TransferEngine._extract_with_7zz(
+                        seven, archive_path, extract_dir)
+                if seven_ok:
+                    pass
+                else:
+                    try:
+                        import py7zr
+                    except ImportError:
+                        return [], ("解压失败: 未找到 7zz 且缺少 py7zr 库，"
+                                    "无法解压 .7z 文件"), extract_dir
+                    try:
+                        with py7zr.SevenZipFile(archive_path, 'r', password='') as zf:
+                            zf.extractall(extract_dir)
+                    except Exception as e:
+                        return [], f"7z 解压失败: {e}", extract_dir
 
-            # ── RAR ──
+            # ── RAR（用打包的 7zz 静态二进制解压，可解 RAR4/RAR5）──
             elif name_lower.endswith('.rar') or ext == '.rar':
-                return [], ("RAR 格式暂不支持在手机端解压，请使用 PC 客户端处理该压缩包，"
-                            "或改用 zip/7z 格式分享。"), extract_dir
+                seven = TransferEngine._find_7zz()
+                if not seven:
+                    return [], ("RAR 解压失败: 手机端未打包 7zz 解压器，"
+                                "请使用 PC 客户端处理该压缩包，或改用 zip/7z 格式分享。"), extract_dir
+                if progress_cb:
+                    progress_cb("extract", 0, 0, "正在用 7zz 解压 .rar ...")
+                if not TransferEngine._extract_with_7zz(seven, archive_path, extract_dir):
+                    return [], "RAR 解压失败（7zz 返回错误，可能已加密或格式过新）", extract_dir
 
             # ── 其他格式 ──
             elif ext in ('.iso', '.cab'):

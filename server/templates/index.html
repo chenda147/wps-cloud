@@ -983,7 +983,9 @@ async function renderMoveDir(pid, name) {
     } catch(e) { tree.innerHTML = '<div style="padding:10px;color:var(--text2);">加载失败</div>'; }
 }
 function moveEnterDir(el) {
-    moveNavStack.push({id: el.getAttribute('data-id')||'', name: el.getAttribute('data-name')||''});
+    // 「进入」按钮是子元素，需向上取父容器上的 data-id/data-name（否则回到根目录，表现为点击无反应）
+    const item = el.closest ? (el.closest('.move-item') || el) : el;
+    moveNavStack.push({id: item.getAttribute('data-id')||'', name: item.getAttribute('data-name')||''});
     renderMoveDir(moveNavStack[moveNavStack.length-1].id, moveNavStack[moveNavStack.length-1].name);
 }
 function moveGoRoot() {

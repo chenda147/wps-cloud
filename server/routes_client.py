@@ -350,6 +350,10 @@ def api_client_poll():
                 # 指数退避：任务未到 run_after 时间戳则暂不派发
                 if task.get("run_after") and now < task["run_after"]:
                     continue
+                # ★ 槽位满跳过冷却：客户端连续 skipped 时任务带 skip_until，
+                # 冷却期内不重分配，避免"分配→跳过→重置→再分配"刷屏
+                if task.get("skip_until") and now < task["skip_until"]:
+                    continue
                 # 指定了 target_client 但与本客户端名不匹配的任务：坚决不分发给本客户端，
                 # 留待目标客户端领取（修复过去 unmatched 仍被重新加入分配列表导致
                 # 一台客户端抢走指定给另一台的任务）。
@@ -425,7 +429,21 @@ def api_client_task_status():
                 if client_name and _CLIENT_ACTIVE.get(client_name, 0) > 0:
                     _CLIENT_ACTIVE[client_name] -= 1
                 return jsonify({"success": True})
-            return jsonify({"success": True, "ignored": "still_running"})
+            # ★ 槽位满跳过（msg 无"取消"）：任务实际并未被客户端取走执行。
+            # 若保持 running，客户端 poll 上报的 running_tids 不含该 tid，
+            # "断连恢复同步"会把它重置 pending → 下一轮 poll 又分配 → 客户端
+            # 又槽位满 skipped → 形成"分配→跳过→重置→再分配"的 5 秒刷屏死循环
+            # （真机日志：同一批任务每 5 秒反复推送、从不下载）。
+            # 改为：立即回 pending 并加 60 秒派发冷却，本轮不再重分配，防刷屏；
+            # 客户端有空槽后冷却结束自动可领。任务实际卡死在客户端时，由
+            # running 超时(600s×3)兜底判失败，不会无限空转。
+            _CLIENT_TASKS[tid]["status"] = "pending"
+            _CLIENT_TASKS[tid]["polled_by"] = ""
+            _CLIENT_TASKS[tid]["skip_until"] = time.time() + 60
+            _CLIENT_TASKS[tid]["result_msg"] = (msg or "槽位满跳过") + "（60秒冷却）"
+            if client_name and _CLIENT_ACTIVE.get(client_name, 0) > 0:
+                _CLIENT_ACTIVE[client_name] -= 1
+            return jsonify({"success": True, "ignored": "cooldown"})
         _CLIENT_TASKS[tid]["status"] = status
         _CLIENT_TASKS[tid]["result_msg"] = msg
         _CLIENT_TASKS[tid]["finished_at"] = time.time()
@@ -556,6 +574,11 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
     for t in tasks:
         if t.get("id") == chase_id:
             t["last_check"] = _beijing_now().strftime("%Y-%m-%d %H:%M:%S")
+            # ── 分享链接有效性（卡片右上角 绿=有效 / 红=失效）──
+            # 每次检查（手动/每天/每周/每N小时）都会刷新，HOURS:1 即每小时刷新一次
+            t["share_status"] = "invalid" if error else "valid"
+            t["share_error"] = (str(error)[:300] if error else "")
+            t["share_status_ts"] = _beijing_now().strftime("%m-%d %H:%M")
             # ── 追更已停止：不再创建任何下载/续扫任务，仅记录检查时间 ──
             if t.get("stopped"):
                 _save_chase(tasks)
@@ -579,8 +602,10 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                     if _epn is not None:
                         _wps_new.add(int(_epn))
                 if _wps_new:
-                    _wps_old = set(t.get("wps_eps", []) or [])
-                    t["wps_eps"] = sorted(_wps_old | _wps_new)
+                    # wps_eps = 当次 WPS 目录实际文件快照，直接替换而非累积：
+                    # 累积（|）会让被删除/移走的文件永远留在 wps_eps 里，
+                    # 造成「已传」虚高、漏集误判为已存在。
+                    t["wps_eps"] = sorted(_wps_new)
                     _save_chase(tasks)
             # ── 剧集模式进度自动校准 ──
             # 分享内实际最大集数（排除年份等误报）。若 progress_ep 曾被误报推高
@@ -643,6 +668,14 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
             if not (data.get("movie_files") or []):
                 _done_eps = set(t.get("done_eps", []) or [])
                 _wps_eps = set(t.get("wps_eps", []) or [])
+                # ★ 已存在判定 = WPS 快照 ∪ 客户端确认（并集）：
+                # wps_eps 是服务端探测快照，可能滞后/不完整（WPS 云同步延迟、
+                # 探测遗漏）；done_eps 是客户端逐集确认上传成功。两者任一命中
+                # 即视为已存在，否则会出现"快照缺集 → 已成功集被反复重新下载"
+                # 的循环（完成 E04 后又派 E04）。
+                # 若确需剔除 done_eps 虚高误报（上传路径异常），可用「查缺失」
+                # 手动覆盖指定集数后重下。
+                _confirmed = _wps_eps | _done_eps
                 _abandoned = set(t.get("abandoned_eps", []) or [])
                 _base = t.get("base_ep", 0)
                 _manual_eps = t.get("manual_episodes", {}) or {}
@@ -652,7 +685,7 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                         _ep = int(_k)
                     except (ValueError, TypeError):
                         continue
-                    if (_ep <= _base or _ep in _done_eps or _ep in _wps_eps
+                    if (_ep <= _base or _ep in _confirmed
                             or _ep in _known or _ep in _existing_eps):
                         continue
                     # 失败重试已耗尽的集不再自动补漏，避免每次检查重复下发
@@ -682,32 +715,42 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                 # 指定了具体季（key>0）时，需同时匹配文件名的季别
                 _has_season_spec = any(s > 0 for s in _wanted_map)
                 _forced = []
-                for _k, _fname in siblings.items():
-                    try:
-                        _ep = int(_k)
-                    except (ValueError, TypeError):
-                        continue
-                    if not _fname:
-                        continue
-                    # 从文件名提取季别（SxxExx 或 Sxx）；无季别标记视为 0（不分季）
-                    _mfs = re.search(r'[Ss](\d{1,2})[Ee]\d+', _fname)
-                    if not _mfs:
-                        _mfs = re.search(r'[Ss](\d{1,2})', _fname)
-                    _fseason = int(_mfs.group(1)) if _mfs else 0
-                    _match = False
-                    for _s, _eps in _wanted_map.items():
-                        if _s == 0:
-                            # 任意季（不分季）：只要集号命中即可
-                            if _ep in _eps:
-                                _match = True
-                                break
-                        else:
-                            # 指定季：集号命中 且 文件季别一致
-                            if _fseason == _s and _ep in _eps:
-                                _match = True
-                                break
-                    if _match:
-                        _forced.append(_ep)
+                # ★ 优先用预览匹配结果（preview_cache.matched）：预览/浏览时已确认
+                # 原文件名 ↔ 集号/季别/重命名 的映射（如 09.mp4 → 逆天邪神
+                # (2026) - S01E09.mp4）。指定集数直接查该映射，不必再从文件名猜
+                # 季别——裸数字分享源文件（04.mp4）本身不带 Sxx 标记，而集数归属
+                # 由重命名模板决定，预览结果即权威依据。
+                _pv_matched = (t.get("preview_cache") or {}).get("matched") or []
+                _pv_index = {}
+                for _m in _pv_matched:
+                    _pep = _m.get("ep_num")
+                    _ps = _m.get("season")
+                    if _pep is not None and _ps is not None:
+                        _pv_index.setdefault(int(_pep), {})[int(_ps)] = _m
+                for _s, _eps in sorted(_wanted_map.items(), key=lambda x: x[0]):
+                    for _ep in sorted(_eps):
+                        _pvm = None
+                        _ep_pv = _pv_index.get(_ep)
+                        if _ep_pv:
+                            _pvm = _ep_pv.get(_s) if _s > 0 else next(iter(_ep_pv.values()))
+                        if _pvm:
+                            _forced.append(_ep)
+                            # 用预览确认的原文件名回填 siblings，保证下发任务的
+                            # file_name/rename_to 与预览一致（客户端按此定位分享源）
+                            if _pvm.get("filename"):
+                                siblings[str(_ep)] = _pvm["filename"]
+                            continue
+                        # ── 预览未命中：回退按文件名解析季别匹配（无季别标记时
+                        #    用追更配置 season 兜底）──
+                        _fname = siblings.get(str(_ep), "")
+                        if not _fname:
+                            continue
+                        _mfs = re.search(r'[Ss](\d{1,2})[Ee]\d+', _fname)
+                        if not _mfs:
+                            _mfs = re.search(r'[Ss](\d{1,2})', _fname)
+                        _fseason = int(_mfs.group(1)) if _mfs else int(t.get("season") or 0)
+                        if _s == 0 or _fseason == _s:
+                            _forced.append(_ep)
                 _forced = sorted(set(_forced))
                 # 跳过已在队列中的集（任务已存在，无需重复创建）
                 _forced = [ep for ep in _forced if ep not in _existing_eps]
@@ -719,12 +762,22 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                 #      （本次检查即顺带做一次缺失/新集校验，从已追进度继续）。
                 _done_eps = set(t.get("done_eps", []) or [])
                 _wps_eps = set(t.get("wps_eps", []) or [])
+                # ★ 并集判定：WPS 快照 ∪ 客户端确认。快照滞后（同步延迟/探测
+                # 遗漏）时，已成功集仍会被 wps_eps 缺失遮蔽 → 每次检查重复派发
+                # 已下载完成的集（日志里 E01-E04 循环数小时的根因）。并集后
+                # 只要任一来源确认存在，即不再下发。
+                _confirmed = _wps_eps | _done_eps
                 _wanted_all = set()
                 for _s, _eps in _wanted_map.items():
                     _wanted_all |= _eps
-                _need = [ep for ep in _forced
-                         if ep not in _done_eps and ep not in _wps_eps]
-                _all_done = bool(_wanted_all) and _wanted_all <= (_done_eps | _wps_eps)
+                _need = [ep for ep in _forced if ep not in _confirmed]
+                # ★15 完成判定（二选一）：
+                #  a) WPS 快照权威：指定集全部真实落在 WPS；
+                #  b) 客户端已逐集确认成功（done_eps 覆盖全部指定集）：即使
+                #     WPS 快照滞后未检出（同步延迟/探测遗漏），也视为补档完成，
+                #     否则"已传完但快照缺集"会触发"完成即重下"无限循环。
+                _all_done = (bool(_wanted_all) and bool(_wps_eps) and _wanted_all <= _wps_eps) or \
+                            (bool(_wanted_all) and _wanted_all <= _done_eps)
                 if _all_done:
                     # 指定集已全部完成：覆盖掉指定集数，恢复追更模式
                     _old_filter = t.get("episodes_filter", "")
@@ -737,18 +790,62 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                     _save_chase(tasks)
                     # 不 return：继续走下方常规流程，本次检查即查缺失/新集
                 elif _need:
+                    # ★ 合并常规新集：指定集数补档之外，把分享源发现的新集
+                    # （如 S01E51——WPS 目录之外，查缺失以 WPS 已存最大集为界
+                    # 报不出它）一并派发。否则 episodes_filter 非空会锁死强制
+                    # 分支并直接 return，常规追更（发现新集）永不执行，最新集
+                    # 永远不推。合并条件：未确认（wps/done 并集）、不在队列。
+                    _extra_eps = []
+                    for _ep0 in list(episodes or []):
+                        try:
+                            _ep0 = int(_ep0)
+                        except (TypeError, ValueError):
+                            continue
+                        if (_ep0 not in _confirmed and _ep0 not in _existing_eps
+                                and _ep0 not in _need):
+                            _extra_eps.append(_ep0)
+                    if _extra_eps:
+                        _need = sorted(set(_need) | set(_extra_eps))
                     with _chase_batch_lock:
                         _chase_batch_pending[chase_id] = set()
                     for _ep in _need:
                         _create_chase_download_task(t, _ep, siblings)
-                    _skip_n = len(_forced) - len(_need)
+                    _skip_n = len(_forced) - len(set(_forced) & set(_need))
+                    _extra_txt = (f" + 新集 {len(_extra_eps)} 集" if _extra_eps else "")
                     t["last_result"] = (f"指定集数 {_ep_filter} 补档 {len(_need)} 集"
-                                        f": {_need[0]}-{_need[-1]}"
+                                        f": {_need[0]}-{_need[-1]}{_extra_txt}"
                                         + (f"（{_skip_n} 集已完成跳过）" if _skip_n > 0 else ""))
                     _append_chase_history(t, "forced", "info", t["last_result"], eps=_need)
                     _save_chase(tasks)
                     return {"success": True, "forced": True}
-                # 其余情况（无匹配集/无待补集）：继续走下方常规流程
+                elif _forced:
+                    # 指定集有匹配但已全部确认（done_eps/wps_eps 覆盖），
+                    # 或剩余集在分享源中不存在：不再重复派发，明确提示状态，
+                    # 避免用户误以为"一直卡住"。
+                    _src_missing = sorted(_wanted_all - set(_forced))
+                    _miss_txt = "、".join(str(e) for e in _src_missing[:12]) \
+                        + ("…" if len(_src_missing) > 12 else "")
+                    _parts = []
+                    if _src_missing:
+                        _parts.append(f"分享源中不存在 {_miss_txt}（等待分享源更新后重查）")
+                    if not _src_missing:
+                        _parts.append("指定集已全部完成")
+                    t["last_result"] = (f"指定集数 {_ep_filter}: " + "；".join(_parts)
+                                        + "（已确认，不重复下发）")
+                    _append_chase_history(t, "forced", "info", t["last_result"],
+                                          eps=sorted(_wanted_all))
+                    _save_chase(tasks)
+                    return {"success": True, "forced_done": True}
+                elif _wanted_map:
+                    # 分享源中没有任何指定集的匹配文件
+                    _miss_all = "、".join(str(e) for e in sorted(_wanted_all)[:12]) \
+                        + ("…" if len(_wanted_all) > 12 else "")
+                    t["last_result"] = (f"指定集数 {_ep_filter}: 分享源中未找到 {_miss_all}"
+                                        f" 的文件（共 {len(_wanted_all)} 集，请确认分享链接/季别是否正确）")
+                    _append_chase_history(t, "forced", "warn", t["last_result"],
+                                          eps=sorted(_wanted_all))
+                    _save_chase(tasks)
+                    return {"success": True, "forced_none": True}
             if error:
                 t["last_result"] = f"检查失败: {error}"
                 _append_chase_history(t, "check", "error", t["last_result"])
@@ -772,9 +869,15 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                 if not (data.get("movie_files") or []):
                     _done_eps = set(t.get("done_eps", []) or [])
                     _wps_eps = set(t.get("wps_eps", []) or [])
+                    # ★ 并集判定（与下方补漏逻辑一致）：wps_eps 是服务端探测快照，
+                    # 可能滞后/不完整；done_eps 是客户端逐集确认上传成功。任一命中
+                    # 即视为已存在。若用二选一（wps_eps 非空即忽略 done_eps），补档
+                    # 完成的集（如 5-30）会被反复创建任务，客户端逐个"WPS已存在跳过"，
+                    # 看起来就像"从最后一集(51)才开始真正下载"。
+                    _confirmed = _wps_eps | _done_eps
                     _abandoned = set(t.get("abandoned_eps", []) or [])
                     eps_sorted = [ep for ep in eps_sorted
-                                  if (ep not in _done_eps and ep not in _wps_eps
+                                  if (ep not in _confirmed
                                       and ep not in _abandoned and ep not in _existing_eps)]
                 # ── 电影模式：按文件名去重，逐个视频文件派发下载 ──
                 movie_files = data.get("movie_files", []) or []
@@ -832,6 +935,12 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                                     if fseason == s:
                                         ok = True
                                         break
+                                    # 文件名不带季标记（如 "01.mp4"/"第01集.mp4"）且指定季唯一：
+                                    # 任务上下文就是这一季（单季/不分季任务），视为匹配，
+                                    # 避免单季任务因分享文件名缺 S 标记而误判「无匹配集」不下发
+                                    if fseason == 0 and sum(1 for k in wanted_map if k > 0) == 1:
+                                        ok = True
+                                        break
                                 if ok:
                                     filtered.append(ep)
                             eps_sorted = filtered
@@ -883,9 +992,10 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                         real_ep = int(m["ep"])
                     items.append((real_ep, siblings, m))
                     valid_count += 1
-                # 打包为批量任务下发：同路径多集由客户端流水线处理（上传本集时并行下载下一集），
-                # 单集或跨路径时自动回退为单集任务，行为不变。
-                _create_chase_download_batch_tasks(t, items)
+                # 逐集创建独立下载任务：客户端按 max_concurrent 并发领取多个任务并行执行
+                # （一个任务在上传时，另一个任务在下载；上传锁保证同机同刻仅一个上传）。
+                for _ep, _sib, _man in items:
+                    _create_chase_download_task(t, _ep, _sib, _man)
                 if valid_count < len(eps_sorted):
                     if valid_count == 0:
                         t["last_result"] = (f"发现 {len(eps_sorted)} 集但均不匹配 ep_pattern ({ep_pattern})，未下发下载"

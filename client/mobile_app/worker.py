@@ -141,11 +141,14 @@ class ClientWorker:
         self.log_cb(f"已连接 {url}，客户端: {client_name}，并发: {max_conc}，开始轮询")
         self.status_cb(f"轮询中({max_conc}并发)", '#1F9E57')
 
+        _fail_count = 0  # 连续失败次数：连接异常按 15→30→60s 指数退避重试，避免服务端恢复前请求风暴
         while not self._stop.is_set():
             try:
                 with self._task_active_lock:
                     active_now = self._task_active
-                free_slots = max(1, max_conc - active_now)
+                # 槽位满时不拉任务（batch=0），避免"拉到任务→无槽位跳过→服务端
+                # 冷却/重置→再推送"的刷屏；至少保留 1 个并发时正常拉取
+                free_slots = max(0, max_conc - active_now)
                 with self._running_tids_lock:
                     running_ids = ",".join(self._running_tids) if self._running_tids else ""
                 _live_clouds = load_config().get("clouds", []) or self._cfg.get("clouds", [])
@@ -159,7 +162,7 @@ class ClientWorker:
                           "running_tids": running_ids,
                           "version": CLIENT_VERSION,
                           "cloud_types": cloud_types}
-                r = session.get(f"{url}/api/client/poll", params=params, timeout=15)
+                r = session.get(f"{url}/api/client/poll", params=params, timeout=(10, 30))
                 if r.status_code == 200:
                     data = r.json()
                     # ── 取消指令 ──
@@ -195,9 +198,12 @@ class ClientWorker:
                 else:
                     self.log_cb(f"服务器返回 {r.status_code}")
                     self.status_cb(f"错误({r.status_code})重试中", '#FFB900')
+                    _fail_count += 1
                     self._stop.wait(10)
             except ProxyError:
-                self.log_cb("代理连接失败，切换到直连模式，30秒后重试...")
+                _fail_count += 1
+                _delay = min(30 * _fail_count, 60)  # 30→60s 退避
+                self.log_cb(f"代理连接失败，切换到直连模式，{_delay}秒后重试...")
                 self.status_cb("代理错误(直连重试)", '#FFB900')
                 session.close()
                 session = requests.Session()
@@ -206,17 +212,21 @@ class ClientWorker:
                     self.log_cb("服务器重新登录失败")
                     self.status_cb("登录失败", '#E0412C')
                     return
-                self._stop.wait(30)
+                self._stop.wait(_delay)
             except ConnectionError:
-                self.log_cb("连接失败，15秒后重试...")
+                _fail_count += 1
+                _delay = min(15 * (2 ** (_fail_count - 1)), 60)  # 15→30→60s 指数退避
+                self.log_cb(f"连接失败，{_delay}秒后重试...")
                 self.status_cb("连接失败(重试中)", '#FFB900')
-                self._stop.wait(15)
-                if not self._stop.is_set():
-                    self.status_cb(f"轮询中({max_conc}并发)", '#1F9E57')
+                self._stop.wait(_delay)
             except Exception as e:
-                self.log_cb(f"轮询出错: {e}")
-                self._stop.wait(5)
+                _fail_count += 1
+                _delay = min(10 * (2 ** (_fail_count - 1)), 60)  # 10→20→40→60s 指数退避
+                self.log_cb(f"轮询出错: {e}，{_delay}秒后重试")
+                self._stop.wait(_delay)
             else:
+                _fail_count = 0
+                self.status_cb(f"轮询中({max_conc}并发)", '#1F9E57')  # 成功轮询才恢复状态
                 self._stop.wait(5)
         self.log_cb("轮询已停止")
         self.status_cb("已断开", '#848D97')

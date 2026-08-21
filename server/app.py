@@ -115,7 +115,7 @@ def _handle_uncaught(exc):
 # 启动
 # ══════════════════════════════════════════════════
 if __name__ == "__main__":
-    cfg = load_config()
+    cfg = load_config() 
     port = cfg.get("server_port", 58000)
     print("=" * 55)
     print("  WPS 365 云盘管理面板 v2")

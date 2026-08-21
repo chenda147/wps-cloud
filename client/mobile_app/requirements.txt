@@ -1,6 +1,8 @@
 # 手机版依赖（Kivy 工程，buildozer 会读取 buildozer.spec 的 requirements）
 # 桌面调试用（手机端由 python-for-android 打包）
 # 注意：py7zr 及其依赖 pybcj/pyppmd 无法在 python-for-android 下交叉编译，故不打包。
+#       手机端 7z/rar 解压由 tools/7zz（7-Zip 26.02 arm64 完全静态二进制）subprocess 调用，
+#       zip/tar 用标准库解压；7z 在无 7zz 环境可回退 py7zr（若手动安装）。
 # 注意：chardet/charset_normalizer 必须锁定纯 Python 版本（见 buildozer.spec 注释 3），
 #       否则 CI 交叉构建会装入 x86_64 的 C 扩展，arm64 真机启动即闪退。
 # 注意：不能用 pycryptodome！其 C 扩展在 Android 上 ctypes 加载崩溃

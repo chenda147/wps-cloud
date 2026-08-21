@@ -39,9 +39,22 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 
 def get_save_dir():
-    """下载临时目录（Android 私有目录下），上传完成后自动删除"""
-    d = os.path.join(BASE_DIR, "downloads")
-    os.makedirs(d, exist_ok=True)
+    """下载临时目录：优先用配置 save_dir（自定义路径），否则默认应用私有目录 downloads。
+    上传完成后自动删除。Android 上自定义公共目录（如 /sdcard/Download）需在系统设置
+    授予“所有文件访问权限”（MANAGE_EXTERNAL_STORAGE），否则可能写入/删除失败。"""
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    d = (cfg.get("save_dir") or "").strip()
+    if not d:
+        d = os.path.join(BASE_DIR, "downloads")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        # 自定义路径不可写时回退到应用私有目录，保证下载不中断
+        d = os.path.join(BASE_DIR, "downloads")
+        os.makedirs(d, exist_ok=True)
     return d
 
 

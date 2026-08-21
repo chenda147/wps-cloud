@@ -81,6 +81,35 @@ def _broadcast_chase_cancel(chase_id, client_name="", cancel_running=False):
         elif cancel_running and t.get("status") == "running":
             t["status"] = "cancelled"
 
+
+def _send_chase_resume_signals(chase_id, chase):
+    """清除该追更的取消指令/取消集记录，并向（可能收到过取消指令的）客户端下发恢复信号。
+
+    与停止时的「广播取消」对称：未指定 target_client 且无取消记录（如服务端重启后
+    状态丢失）时，广播给所有在线客户端。否则客户端本地取消事件（60秒窗口）残留，
+    重新运行后新任务会被客户端误取消，导致流水线断在某一集。"""
+    if not chase_id:
+        return
+    _resume_clients = set()
+    for _cn in list(_CANCEL_REQUESTS.keys()):
+        if chase_id in _CANCEL_REQUESTS.get(_cn, {}):
+            del _CANCEL_REQUESTS[_cn][chase_id]
+            _resume_clients.add(_cn)
+            if not _CANCEL_REQUESTS[_cn]:
+                del _CANCEL_REQUESTS[_cn]
+    _tc = (chase.get("target_client") or "").strip()
+    if _tc:
+        _resume_clients.add(_tc)
+    elif not _resume_clients:
+        _resume_clients.update(_CLIENT_REGISTRY.keys())
+    for _cn in _resume_clients:
+        _RESUME_REQUESTS.setdefault(_cn, set()).add(chase_id)
+    # 清除"最近被取消"的集记录：重新运行后允许重新补建下载
+    _CANCELED_EPS.pop(chase_id, None)
+    # 派发冷却 10 秒：给客户端一个 poll 周期接收「恢复指令」，清除本地取消状态
+    _CHASE_RESUME_COOLDOWN[chase_id] = time.time() + 10
+
+
 @bp.route("/api/admin/chase/<chase_id>/stop", methods=["POST"])
 @login_required
 def api_admin_chase_stop(chase_id):
@@ -114,25 +143,7 @@ def api_admin_chase_reset(chase_id):
     _save_chase(tasks)
     # ── 清除该追更的取消指令并下发"恢复"信号：防止客户端取消窗口(60s)内
     # 重新运行后被误取消（停止时客户端已 set 本地取消事件，必须显式恢复）──
-    _resume_clients = set()
-    for _cn in list(_CANCEL_REQUESTS.keys()):
-        if chase_id in _CANCEL_REQUESTS.get(_cn, {}):
-            del _CANCEL_REQUESTS[_cn][chase_id]
-            _resume_clients.add(_cn)
-            if not _CANCEL_REQUESTS[_cn]:
-                del _CANCEL_REQUESTS[_cn]
-    # 无取消记录时也至少给 target_client 下发恢复（防服务端重启后客户端残留取消状态）
-    _tc = (chase.get("target_client") or "").strip()
-    if _tc:
-        _resume_clients.add(_tc)
-    for _cn in _resume_clients:
-        _RESUME_REQUESTS.setdefault(_cn, set()).add(chase_id)
-    # 清除"最近被取消"的集记录：重新运行后允许重新补建下载
-    _CANCELED_EPS.pop(chase_id, None)
-    # ── 派发冷却 10 秒：重新运行后给客户端一个 poll 周期接收「恢复指令」，
-    # 新客户端收到恢复指令立即清除本地取消状态，随后任务正常下发；
-    # 对旧客户端（不处理恢复信号）由取消不重试 + _CANCELED_EPS 60 秒保护兜底，不刷屏 ──
-    _CHASE_RESUME_COOLDOWN[chase_id] = time.time() + 10
+    _send_chase_resume_signals(chase_id, chase)
     logging.getLogger("routes_chase").info(
         f"[追更重置] {chase.get('name', chase_id)} 冷却至 "
         f"{time.strftime('%H:%M:%S', time.localtime(time.time() + 10))}，"
@@ -154,6 +165,8 @@ def api_admin_chase_retry(chase_id):
     chase["last_error_type"] = ""
     chase["last_error"] = ""
     _save_chase(tasks)
+    # 重试视为恢复：清除客户端取消状态残留（幂等）
+    _send_chase_resume_signals(chase_id, chase)
     # 复用检查派发逻辑
     try:
         _create_chase_check_task(chase, manual=True)
@@ -163,6 +176,47 @@ def api_admin_chase_retry(chase_id):
         return jsonify({"success": False, "message": f"重试派发失败：{e}"}), 500
     name = chase.get("name", chase_id)
     return jsonify({"success": True, "message": f"已清除失败计数并触发检查：{name}"})
+
+
+def _auto_progress_ep_from_wps(cli, wps_path):
+    """「已追至」留空时：取 WPS 目标目录（含 Season N / SN 子目录）已存最大集数。
+    找不到任何集数文件返回 0（任务从第 0 集起正常追更）。"""
+    num_re = re.compile(r'[Ee](\d+)|第\s*(\d+)\s*集|(\d+)\s*集')
+    max_ep = 0
+
+    def _scan(files):
+        _m = 0
+        for f in files:
+            nm = (f.get("fname") or f.get("name") or "").strip()
+            mm = num_re.search(nm)
+            if mm:
+                _m = max(_m, int(mm.group(1) or mm.group(2) or mm.group(3)))
+        return _m
+
+    if not cli or not wps_path:
+        return 0
+    try:
+        folder_id = _resolve_folder_id_with_client(cli, wps_path)
+    except Exception:
+        return 0
+    if folder_id is None:
+        return 0
+    try:
+        root_files = cli.get_all_files(DEFAULT_GROUP_ID, folder_id)
+    except Exception:
+        return 0
+    max_ep = max(max_ep, _scan(root_files))
+    # 集文件常放在季子目录里，顺带扫描一层
+    for f in root_files:
+        nm = (f.get("fname") or f.get("name") or "").strip()
+        if re.match(r'^[Ss]eason\s*\d+$', nm) or re.match(r'^[Ss]\d+$', nm):
+            try:
+                sub_id = _resolve_folder_id_with_client(cli, f"{wps_path}/{nm}")
+                if sub_id is not None:
+                    max_ep = max(max_ep, _scan(cli.get_all_files(DEFAULT_GROUP_ID, sub_id)))
+            except Exception:
+                pass
+    return max_ep
 
 
 def _query_wps_missing(cli, wps_path, start_ep=1, season_hint=0, upper_hint=0):
@@ -229,13 +283,14 @@ def _query_wps_missing(cli, wps_path, start_ep=1, season_hint=0, upper_hint=0):
     # —— 2) 逐目录构建每季的缺失结果 ——
     def build_season_result(season, path, files, use_upper_hint=True):
         eps = extract_eps([_fname(f) for f in files])
-        # 多季扫描时 progress_ep 是全局的，不应污染每季上限：
-        # 每季只以自己已存最大集为「应追上限」（查缺失 = 已存最大集之前缺什么）。
-        # 单季/根目录模式才用 progress_ep 兜底推断缺失范围。
-        if use_upper_hint:
-            upper = max(upper_hint, eps[-1] if eps else 0)
+        # 只要 WPS 有已存集数文件，就一律以 WPS 实际最大集为应追上限。
+        # 不能用 progress_ep（「已追至」）当上限：它会被下载进度持续推高
+        # （如 WPS 只有 20 集、下载已到 50 集时，total_known 会被虚报成 50），
+        # 与 WPS 实际不符。progress_ep 仅在 WPS 目录无已存集数时兜底推断缺失范围。
+        if eps:
+            upper = eps[-1]
         else:
-            upper = eps[-1] if eps else 0
+            upper = max(upper_hint, 0)
         if not eps:
             missing = [e for e in range(start_ep, upper + 1)] if upper >= start_ep else []
         else:
@@ -330,7 +385,8 @@ def _query_wps_missing(cli, wps_path, start_ep=1, season_hint=0, upper_hint=0):
 @login_required
 def api_admin_chase_wps_status_by_path():
     """按 WPS 路径直接反查缺失（无需先保存追更任务）。
-    查询参数: wps_path(必填), start_ep(可选,默认1), season(可选,季提示), progress_ep(可选,追至上限)
+    查询参数: wps_path(必填), start_ep(可选,默认1), season(可选,季提示),
+              progress_ep(可选,追至上限), chase_id(可选,写回 wps_eps 校准)
     """
     wps_path = (request.args.get("wps_path") or "").strip()
     cli, _ = get_wps_client()
@@ -340,6 +396,31 @@ def api_admin_chase_wps_status_by_path():
     result, err = _query_wps_missing(cli, wps_path, start_ep, season_hint, upper_hint)
     if err:
         return jsonify({"success": False, "message": err}), 500
+    chase_id = (request.args.get("chase_id") or "").strip()
+    if chase_id and result:
+        # 查缺失结果 = WPS 实际文件快照，写回任务的 wps_eps（替换而非累积）。
+        # 这样卡片「已传」与漏集判定都以 WPS 实际为准，不受 done_eps 虚高
+        # （上传路径异常时记录在案但 WPS 实际无文件）影响。
+        _present = result.get("present_eps") or []
+        try:
+            with _CHASE_FILE_LOCK:
+                _tasks2 = _load_chase()
+                for _t2 in _tasks2:
+                    if _t2.get("id") == chase_id:
+                        _present_set = set(int(x) for x in _present)
+                        _t2["wps_eps"] = sorted(_present_set)
+                        # ★ done_eps 虚高校准：done_eps 是客户端历史确认（可能上传
+                        # 路径异常/文件被移走删除，记录在案但 WPS 实际无文件）。
+                        # 查缺失=WPS 实际快照，剔除 done_eps 中 WPS 实际不存在的集，
+                        # 否则主流程 check 的并集判定(wps_eps|done_eps)会永远挡住
+                        # 这些集的补追，表现为"缺失的集(如5-30)不派发，只派最后一集"。
+                        _de = set(int(x) for x in (_t2.get("done_eps") or []))
+                        _de &= _present_set
+                        _t2["done_eps"] = sorted(_de)
+                        _save_chase(_tasks2)
+                        break
+        except Exception:
+            pass
     return jsonify(result)
 
 
@@ -607,6 +688,7 @@ def api_admin_chase_create():
 @login_required
 def api_admin_chase_update(cid):
     data = request.get_json() or {}
+    auto_ctx = {}  # 「已追至」留空时需要自动取 WPS 最大集的上下文
     with _CHASE_FILE_LOCK:
         tasks = _load_chase()
         for t in tasks:
@@ -626,9 +708,32 @@ def api_admin_chase_update(cid):
                 if "enabled" in data:
                     t["enabled"] = bool(data["enabled"])
                 t["wps_path"] = _calc_chase_wps_path(t)
-                _save_chase(tasks)
-                return jsonify({"success": True, "message": "已更新"})
-        return jsonify({"success": False, "message": "任务不存在"}), 404
+                if "progress_ep" in data and data["progress_ep"] is None:
+                    # 已追至留空 → 自动取 WPS 目标目录已存最大集数（锁外查询，避免持锁网络请求）
+                    auto_ctx["wps_path"] = t["wps_path"]
+                else:
+                    _save_chase(tasks)
+                    return jsonify({"success": True, "message": "已更新"})
+                break
+        else:
+            return jsonify({"success": False, "message": "任务不存在"}), 404
+    # 锁外查询 WPS（单次目录列举，通常 <2s；失败则回退为 0）
+    auto_ep = 0
+    try:
+        cli, _ = get_wps_client()
+        auto_ep = _auto_progress_ep_from_wps(cli, auto_ctx["wps_path"])
+    except Exception:
+        pass
+    with _CHASE_FILE_LOCK:
+        for t in tasks:
+            if t.get("id") == cid:
+                t["progress_ep"] = auto_ep
+                t["wps_path"] = _calc_chase_wps_path(t)
+                break
+        _save_chase(tasks)
+    return jsonify({"success": True, "message": "已更新",
+                    "auto_progress_ep": auto_ep,
+                    "note": "已追至留空，已自动取 WPS 已存最大集数"})
 
 @bp.route("/api/admin/chase/<cid>", methods=["DELETE"])
 @login_required
@@ -660,6 +765,8 @@ def api_admin_chase_manual_check(cid):
         if t.get("id") == cid:
             if t.get("stopped"):
                 return jsonify({"success": False, "message": "任务已完全停止，请先重置"}), 400
+            # 手动运行视为恢复：清除客户端取消状态残留（幂等），防止流水线断在某一集
+            _send_chase_resume_signals(cid, t)
             _create_chase_check_task(t, manual=True)
             return jsonify({"success": True, "message": "追更检查已触发（服务端执行）"})
     return jsonify({"success": False, "message": "任务不存在"}), 404
@@ -688,6 +795,8 @@ def api_admin_chase_run_all():
             skipped.append({"id": t.get("id"), "name": t.get("name", ""), "reason": "已有任务进行中"})
             continue
         try:
+            # 一键运行视为恢复：清除可能残留的客户端取消状态（幂等）
+            _send_chase_resume_signals(t.get("id") or t.get("chase_id") or "", t)
             _create_chase_check_task(t, manual=True)
             created.append(t.get("name", t.get("id", "")))
         except Exception as e:

@@ -16,7 +16,8 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,otf,json
 
 # (list) List of inclusions using pattern matching
-source.include_patterns = yidong_core.py,quark_core.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,fonts/*
+# tools/* 为 7-Zip 官方 Linux arm64 完全静态二进制 7zz（26.02），用于手机端解压 7z/rar/zip
+source.include_patterns = yidong_core.py,quark_core.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,fonts/*,tools/*
 
 # (list) Source files to exclude (let empty to not exclude anything)
 source.exclude_exts = pyc,pyo
@@ -33,7 +34,8 @@ version = 1.0.0
 #    （_PyUnicode_FastCopyCharacters 等已移除，gcc -Werror 编译失败）。
 #    Kivy 2.3.0 官方支持的最高稳定版本是 3.11/3.12，这里锁 3.11.9 最稳。
 # 2) py7zr 依赖 pybcj/pyppmd（Cython3 编译），与 p4a 工具链不兼容，已从打包清单移除。
-#    手机端 7z 解压暂不支持（代码已做降级提示），zip/tar 用标准库正常解压。
+#    手机端 7z/rar 解压改由 tools/7zz（7-Zip 26.02 arm64 完全静态二进制）subprocess 调用，
+#    zip/tar 用标准库（zipfile/tarfile）解压；7z 在无 7zz 环境可回退 py7zr（若手动安装）。
 # 3) 必须锁定 chardet==5.2.0 和 charset_normalizer==2.1.0（均为纯 Python 实现）！
 #    chardet 6.x（2025 起）新增 Cython 扩展 orchestrator.so，CI 交叉构建时 pip 会
 #    误装入 x86_64 manylinux wheel，导致 arm64 真机启动报
@@ -61,7 +63,9 @@ orientation = portrait
 fullscreen = 0
 
 # (list) Permissions
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,WAKE_LOCK
+# READ/WRITE/MANAGE_EXTERNAL_STORAGE：支持自定义下载临时目录（如 /sdcard/Download）。
+# Android 11+ 的 MANAGE_EXTERNAL_STORAGE 需用户在系统设置中手动授予“所有文件访问权限”。
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,WAKE_LOCK,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,READ_MEDIA_VIDEO
 
 # (int) Target Android API
 android.api = 33

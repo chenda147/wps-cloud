@@ -193,6 +193,16 @@ class SettingsPage(BoxLayout):
         self.wps_input = self._row('WPS Cookie', cfg.get('wps_cookie', ''), multiline=True)
         self.parent_input = self._row('WPS 目标目录ID', cfg.get('wps_parent_id', '0'))
 
+        self._sep('下载存储')
+        self.dir_input = self._row('下载临时目录(可空)', cfg.get('save_dir', ''))
+        dir_tip = Label(text='可空：默认存应用私有目录，上传后自动清理。自定义如 /sdcard/Download '
+                             '需在系统设置中授予“所有文件访问权限”。',
+                        font_size='11sp', color=(0.52, 0.55, 0.59, 1), halign='left', valign='top',
+                        size_hint_y=None)
+        dir_tip.bind(width=lambda *a: setattr(dir_tip, 'text_size', (dir_tip.width, None)))
+        dir_tip.bind(texture_size=lambda *a: setattr(dir_tip, 'height', dir_tip.texture_size[1]))
+        self.body.add_widget(dir_tip)
+
         btn = Button(text='保存配置', size_hint_y=None, height=dp(48),
                      background_color=(0.12, 0.62, 0.34, 1), color=(1, 1, 1, 1))
         btn.bind(on_release=self._save)
@@ -254,6 +264,7 @@ class SettingsPage(BoxLayout):
             'clouds': clouds,
             'wps_cookie': self.wps_input.text.strip(),
             'wps_parent_id': self.parent_input.text.strip() or '0',
+            'save_dir': self.dir_input.text.strip(),
         })
         save_config(cfg)
         self.app.notify('配置已保存')
