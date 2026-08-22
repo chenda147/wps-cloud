@@ -781,7 +781,7 @@ def _unified_scheduler():
                 last_ts = 0
                 if last:
                     try:
-                        lt = datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+                        lt = datetime.strptime(last, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BEIJING_TZ)
                         last_ts = (now - lt).total_seconds()
                         if last_ts < 60:
                             continue
@@ -816,7 +816,7 @@ def _unified_scheduler():
                 last = t.get("last_run", "")
                 if last:
                     try:
-                        lt = datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+                        lt = datetime.strptime(last, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BEIJING_TZ)
                         if (now - lt).total_seconds() < 60:
                             continue
                     except Exception:
