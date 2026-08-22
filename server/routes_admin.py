@@ -383,6 +383,48 @@ def api_admin_save_notify():
     save_config(cfg)
     return jsonify({"success": True, "message": "通知设置已保存"})
 
+@bp.route("/api/admin/settings/tunnel", methods=["GET"])
+@login_required
+def api_admin_get_tunnel():
+    cfg = load_config()
+    tun = cfg.get("tunnel", {}) or {}
+    return jsonify({
+        "server": tun.get("server", ""),
+        "port": int(tun.get("port", 13390) or 13390),
+        "ctrl_port": int(tun.get("ctrl_port", 7000) or 7000),
+        "data_port": int(tun.get("data_port", 7001) or 7001),
+        "local_port": int(cfg.get("server_port", 58000)),
+        "secret_set": bool((tun.get("secret") or "").strip()),
+    })
+
+@bp.route("/api/admin/settings/tunnel", methods=["POST"])
+@login_required
+def api_admin_save_tunnel():
+    data = request.get_json() or {}
+    cfg = load_config()
+    tun = cfg.setdefault("tunnel", {})
+    tun["server"] = (data.get("server") or "").strip()
+    try:
+        tun["port"] = max(1, min(65535, int(data.get("port") or 13390)))
+    except (ValueError, TypeError):
+        tun["port"] = 13390
+    try:
+        tun["ctrl_port"] = max(1, min(65535, int(data.get("ctrl_port") or 7000)))
+    except (ValueError, TypeError):
+        tun["ctrl_port"] = 7000
+    try:
+        tun["data_port"] = max(1, min(65535, int(data.get("data_port") or 7001)))
+    except (ValueError, TypeError):
+        tun["data_port"] = 7001
+    secret = (data.get("secret") or "").strip()
+    if secret:
+        tun["secret"] = secret
+    # 未填 secret 且已有密钥 → 保留原值；地址+密钥都空 → 视为关闭穿透
+    save_config(cfg)
+    from .tunnel_client import start_tunnel_if_configured
+    start_tunnel_if_configured(cfg)
+    return jsonify({"success": True, "message": "穿透配置已保存并生效"})
+
 @bp.route("/api/admin/settings/notify/test", methods=["POST"])
 @login_required
 def api_admin_test_notify():

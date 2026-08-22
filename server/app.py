@@ -127,4 +127,6 @@ if __name__ == "__main__":
     print(f"  按 Ctrl+C 停止")
     print("=" * 55)
     threading.Thread(target=_unified_scheduler, daemon=True).start()
+    from .tunnel_client import start_tunnel_if_configured
+    start_tunnel_if_configured(cfg)
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

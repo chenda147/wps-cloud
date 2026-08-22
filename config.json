@@ -1,3 +1,10 @@
 {
-  "server_port": 58000
+  "server_port": 58000,
+  "tunnel": {
+    "server": "",
+    "secret": "",
+    "port": 13390,
+    "ctrl_port": 7000,
+    "data_port": 7001
+  }
 }
