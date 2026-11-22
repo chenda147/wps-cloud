@@ -23,7 +23,7 @@ source.include_patterns = yidong_core.py,quark_core.py,wps_uploader.py,chase_eng
 source.exclude_exts = pyc,pyo
 
 # (str) Application versioning (method 1)
-version = 1.0.0
+version = 1.0.1
 
 # (list) Application requirements
 # 注意：

@@ -103,8 +103,8 @@ class TransferEngine:
 
     def _wps_list_files(self, parent_id):
         import json as _json
-        files, offset = [], 0
-        while True:
+        files, offset, seen = [], 0, set()
+        for _ in range(100):
             params = {"offset": offset, "count": 500}
             if parent_id and str(parent_id) not in ("0", "None", ""):
                 params["parentid"] = str(parent_id)
@@ -114,7 +114,13 @@ class TransferEngine:
                 if r.status_code != 200:
                     break
                 batch = r.json().get("files", [])
-                files.extend(batch)
+                # 按 id 去重：部分账号会忽略 offset 反复返回同一批，避免死循环
+                new_items = [f for f in batch if str(f.get("id")) not in seen]
+                if not new_items:
+                    break
+                for f in new_items:
+                    seen.add(str(f.get("id")))
+                files.extend(new_items)
                 if len(batch) < 500:
                     break
                 offset += 500
