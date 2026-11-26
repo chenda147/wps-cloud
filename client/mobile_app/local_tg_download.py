@@ -408,9 +408,10 @@ def _save_map(path, data):
 # ────────────────────────── 主流程 ──────────────────────────
 
 def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
-             timeout_min=90, size_text=""):
+             timeout_min=90, size_text="", link=""):
     """在手机上打开消息 → 按状态下载 → 复制到 dest_path。
 
+    link：服务端下发的消息链接（优先使用，私有频道/无用户名频道都能直达）。
     返回 (dest_path, error)：成功时 error 为空串；失败返回 (None, 原因)。
     progress(done_bytes, speed_mb_s) 为进度回调。
     """
@@ -421,10 +422,21 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
     log("[本机TG] 环境正常：%s" % detail)
 
     channel = str(channel or "").lstrip("@")
-    if not channel or not msg_id:
-        return None, "缺少频道或消息 ID"
+    msg_id = str(msg_id or "").strip()
+    # 候选链接：服务端给的链接 → t.me/c/-100xxx 去掉 -100 前缀（私有频道）→ 自己拼的
+    cands = []
+    given = str(link or "").strip()
+    if given.startswith("http") and "t.me" in given:
+        cands.append(given)
+        if "/c/-100" in given:
+            cands.append(given.replace("/c/-100", "/c/"))
+    if channel and msg_id:
+        built = "https://t.me/%s/%s" % (channel, msg_id)
+        if built not in cands:
+            cands.append(built)
+    if not cands:
+        return None, "缺少消息链接"
     expect_bytes = _parse_size_text(size_text)
-    link = "https://t.me/%s/%s" % (channel, msg_id)
     dest_dir = os.path.dirname(dest_path) or "."
     try:
         os.makedirs(dest_dir, exist_ok=True)
@@ -432,24 +444,25 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
         pass
 
     mpath = os.path.join(dest_dir, ".phone_tg_map.json")
-    key = "%s/%s" % (channel, msg_id)
+    key = cands[0]
     mapping = _load_map(mpath)
     mapped = mapping.get(key)
 
-    log("[本机TG] 打开：%s" % link)
     _su("svc power stayon true", timeout=20)
     _su("input keyevent 224", timeout=20)
     _su("wm dismiss-keyguard", timeout=20)
     time.sleep(0.5)
-    start_cmd = ("am start -W --user 0 -a android.intent.action.VIEW "
-                 "-d '%s' -p %s" % (link, pkg))
 
     shot_path = os.path.join(dest_dir, "_tg_shot.raw")
     target = None
     box = None
     tapped = False
     for attempt in range(2):
-        _su(start_cmd, timeout=40)
+        # 每次尝试换一个候选链接（deep link 直达该条消息）
+        lk = cands[min(attempt, len(cands) - 1)]
+        log("[本机TG] 打开：%s" % lk)
+        _su("am start -W --user 0 -a android.intent.action.VIEW -d '%s' -p %s"
+            % (lk, pkg), timeout=40)
         time.sleep(2.5)
 
         shot = None

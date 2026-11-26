@@ -697,7 +697,8 @@ class ClientWorker:
             task.get("channel_value") or task.get("chat_id"),
             task.get("msg_id"), dest, log=self.log_cb,
             progress=_p, cancel=cancel_evt, timeout_min=90,
-            size_text=task.get("size_text") or "")
+            size_text=task.get("size_text") or "",
+            link=task.get("link") or "")
         if path:
             return path
         if cancel_evt is not None and cancel_evt.is_set():
