@@ -21,8 +21,8 @@ def _import_telethon():
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         return TelegramClient, StringSession
-    except ImportError:
-        raise TgError("当前客户端未安装 telethon，请更新到最新版客户端")
+    except ImportError as e:
+        raise TgError("Telegram 模块缺失（%s），请更新到最新版客户端" % e)
 
 
 class TgDownloader:

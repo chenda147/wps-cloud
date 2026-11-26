@@ -45,7 +45,7 @@ version = 1.0.1
 # 4) 不用 pycryptodome！其 C 扩展（_raw_ecb.so 等）在 p4a 交叉编译后，Android 运行时
 #    ctypes 加载报 "undefined symbol: PyObject_GetBuffer" 直接崩溃（两次实测确认）。
 #    改用纯 Python 的 pyaes 实现 AES-CBC（见 yidong_core.py，含 PKCS7 pad/unpad 等价实现）。
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,telethon,android
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,rsa==4.9,pyasn1==0.6.1,telethon==1.34.0,android
 
 # (str) Custom source folders for requirements
 #p4a.source_dir =

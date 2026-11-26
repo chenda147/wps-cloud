@@ -143,7 +143,7 @@ class ClientWorker:
         max_conc = self._max_concurrent
         # 连接成功后自动拉取服务端网盘凭据（临时缓存），此后无需本地手动配置
         self._server_creds = self._fetch_server_creds(session, url, client_name)
-        self.log_cb(f"已连接 {url}，客户端: {client_name}，并发: {max_conc}，开始轮询")
+        self.log_cb(f"已连接 {url}，客户端: {client_name}，版本: v{CLIENT_VERSION}，并发: {max_conc}，开始轮询")
         self.status_cb(f"轮询中({max_conc}并发)", '#1F9E57')
 
         _fail_count = 0  # 连续失败次数：连接异常按 15→30→60s 指数退避重试，避免服务端恢复前请求风暴
