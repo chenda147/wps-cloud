@@ -141,6 +141,34 @@ def _foreground_line():
     return line[:160]
 
 
+def _self_pkg():
+    """本应用包名（进程名一般就是包名，服务进程会带 :service 后缀）。"""
+    try:
+        with open("/proc/self/cmdline", "rb") as f:
+            name = f.read().split(b"\0")[0].decode("utf-8", "ignore").strip()
+        if name:
+            return name.split(":")[0]
+    except Exception:
+        pass
+    return "org.wps.transfer.wpstransfer"
+
+
+def _bring_app_front():
+    """把本应用切回前台。应用在后台会被 Android 冻结（cached app freezer），
+    冻结后轮询/上传全部停摆，所以点击完 Telegram 必须马上切回来。"""
+    pkg = _self_pkg()
+    _su("am start -n %s/org.kivy.android.PythonActivity" % pkg, timeout=25)
+    time.sleep(1.5)
+    fg = _foreground_line()
+    if pkg in fg:
+        return True
+    # 组件名不匹配时退回 LAUNCHER 入口
+    _su("monkey -p %s -c android.intent.category.LAUNCHER 1" % pkg, timeout=25)
+    time.sleep(1.5)
+    fg = _foreground_line()
+    return pkg in fg
+
+
 # ────────────────────────── 截图（raw）解析 ──────────────────────────
 
 def _screencap(path):
@@ -328,11 +356,13 @@ def _wait_target(target, log, progress, deadline, cancel=None):
     prev = 0
     stable = 0
     last_t = time.time()
+    tick = 0
     while time.time() < deadline:
         if cancel is not None and cancel.is_set():
             log("[本机TG] 已取消")
             return None
         time.sleep(3)
+        tick += 1
         size = _stat_one(final)
         if size is not None and size > 0:
             log("[本机TG] 下载完成：%s（%.2f MB）" % (final, size / 1048576.0))
@@ -353,6 +383,8 @@ def _wait_target(target, log, progress, deadline, cancel=None):
                 return None
         else:
             stable = 0
+            if tick % 5 == 0:
+                log("[本机TG] 已下载 %.2f MB" % (size / 1048576.0))
         prev = size
     return None
 
@@ -408,54 +440,69 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
     _su("svc power stayon true", timeout=20)
     _su("input keyevent 224", timeout=20)
     _su("wm dismiss-keyguard", timeout=20)
-    time.sleep(1)
+    time.sleep(0.5)
     start_cmd = ("am start -W --user 0 -a android.intent.action.VIEW "
                  "-d '%s' -p %s" % (link, pkg))
-    _su(start_cmd, timeout=40)
-    time.sleep(5)
-    fg = _foreground_line()
-    if fg and pkg not in fg:
-        log("[本机TG] Telegram 未在前台（当前：%s），重新拉起" % fg)
-        _su(start_cmd, timeout=40)
-        time.sleep(6)
-        fg = _foreground_line()
-    log("[本机TG] 当前前台：%s" % (fg or "未知"))
-    if fg and pkg not in fg:
-        log("[本机TG] 仍未确认 Telegram 在前台，继续按截图状态判断")
-    if cancel is not None and cancel.is_set():
-        return None, "已取消"
 
     shot_path = os.path.join(dest_dir, "_tg_shot.raw")
     target = None
     box = None
-    for attempt in range(3):
-        if not _screencap(shot_path):
-            return None, "截图失败（请确认已授予本应用 root 权限）"
-        shot = _read_shot(shot_path)
+    tapped = False
+    for attempt in range(2):
+        _su(start_cmd, timeout=40)
+        time.sleep(2.5)
+
+        shot = None
+        if _screencap(shot_path):
+            shot = _read_shot(shot_path)
+        else:
+            log("[本机TG] 截图失败（root 授权或 screencap 不可用）")
         has_badge, box = (None, None)
         if shot:
             has_badge, box = _has_badge_and_box(shot)
-        files, growing = _snapshot_growth()
+        files = _cache_list()
+        growing = set()
+        if has_badge and not mapped:
+            # 只有"左上角有图标"时才需要采样增长（2 秒），用来区分 下载中/未下载
+            files, growing = _snapshot_growth(rounds=1, gap=2)
         state, target = _detect_state(has_badge, files, growing, mapped, expect_bytes)
         if cancel is not None and cancel.is_set():
+            _bring_app_front()
             return None, "已取消"
 
-        if state == STATE_UNKNOWN:
-            log("[本机TG] 状态无法识别（视频未显示或屏幕未亮），重试 %d/3" % (attempt + 1))
-            time.sleep(3)
-            continue
         if state == STATE_DONE:
             log("[本机TG] 状态：已下载（%s）" % target)
             break
         if state == STATE_DOWNLOADING:
             log("[本机TG] 状态：下载中（%s）" % target)
             break
+        if state == STATE_UNKNOWN:
+            log("[本机TG] 状态无法识别（视频未显示或屏幕未亮），重试 %d/2" % (attempt + 1))
+            time.sleep(1)
+            continue
 
-        # 未下载：点一次视频气泡左上角的下载按钮
-        log("[本机TG] 状态：未下载 → 点击下载按钮")
+        # 未下载：只点一次视频气泡左上角的下载按钮（不重试连点，避免暂停下载）
+        log("[本机TG] 状态：未下载 → 点击一次下载按钮")
         left, top = box[0], box[1]
         _su("input tap %d %d" % (left + 70, top + 65), timeout=20)
-        for _ in range(12):
+        log("[本机TG] 已点击 (%d,%d)，切回本应用继续轮询进度"
+            % (left + 70, top + 65))
+        tapped = True
+        break
+
+    # 立刻切回本应用：应用在后台会被系统冻结，导致整个下载/上传流程卡死；
+    # 切回后 Telegram 仍在后台继续下载，我们只通过 su 读缓存文件大小来判断进度
+    _bring_app_front()
+    try:
+        os.remove(shot_path)
+    except Exception:
+        pass
+
+    if tapped:
+        # 确认点击是否真的触发了下载（10 秒内缓存必须出现新文件或在增长）
+        for _ in range(10):
+            if cancel is not None and cancel.is_set():
+                return None, "已取消"
             time.sleep(1)
             now = _cache_list()
             new = [p for p in now if p not in files]
@@ -468,17 +515,10 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
                 break
         if target:
             log("[本机TG] 已开始下载：%s" % target)
-            break
-        log("[本机TG] 点击后没有开始下载，重试 %d/3" % (attempt + 1))
-        time.sleep(3)
-
-    try:
-        os.remove(shot_path)
-    except Exception:
-        pass
+        else:
+            log("[本机TG] 点击后 10 秒内缓存未增长（可能点击未命中）")
 
     if not target:
-        _su("input keyevent 4", timeout=20)
         return None, "未能启动下载（视频未显示或点击无效）"
 
     if mapping.get(key) != target:
@@ -487,7 +527,6 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
 
     final = _wait_target(target, log, progress, time.time() + timeout_min * 60, cancel)
     if not final:
-        _su("input keyevent 4", timeout=20)
         return None, "等待下载完成超时"
 
     src = "%s/%s" % (cdir, final)
@@ -503,9 +542,4 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
 
     log("[本机TG] 已保存：%s（%.2f MB）"
         % (dest_path, os.path.getsize(dest_path) / 1048576.0))
-
-    # 归位：退出播放器/菜单，回到聊天列表，方便下一次操作
-    _su("input keyevent 4", timeout=20)
-    time.sleep(1)
-    _su("input keyevent 4", timeout=20)
     return dest_path, ""
