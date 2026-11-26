@@ -81,7 +81,18 @@ class ClientWorker:
         self._stop.clear()
         self._task_semaphore = threading.Semaphore(max(1, self._max_concurrent))
         self._ensure_tg_pipeline()
+        threading.Thread(target=self._log_tg_env, daemon=True).start()
         threading.Thread(target=self._srv_loop, daemon=True).start()
+
+    def _log_tg_env(self):
+        """连接时先探测 root / 官方 Telegram：首次会在手机上弹出 root 授权框，
+        用户点“允许”后后续所有模拟点击都直接可用。"""
+        try:
+            import local_tg_download as ltg
+            ok, _pkg, detail = ltg.probe()
+            self.log_cb(f"[TG] 模拟点击环境：{detail}")
+        except Exception as e:
+            self.log_cb(f"[TG] 模拟点击模块异常：{e}")
 
     def stop(self):
         self._stop.set()
@@ -670,12 +681,13 @@ class ClientWorker:
         try:
             import local_tg_download as ltg
         except Exception as e:
+            self.log_cb(f"[TG] 下载模块加载失败：{e}")
             self._post_task_status(session, url, tid, "failed", f"下载模块加载失败：{e}")
             return None
-        if not ltg.available():
-            self._post_task_status(session, url, tid, "failed",
-                                   "模拟点击不可用：请在手机管家/权限里给本应用授予 root 权限，"
-                                   "并确认已安装官方 Telegram")
+        ok, _pkg, detail = ltg.probe()
+        self.log_cb(f"[TG] 模拟点击环境：{detail}")
+        if not ok:
+            self._post_task_status(session, url, tid, "failed", detail)
             return None
 
         def _p(done, spd):

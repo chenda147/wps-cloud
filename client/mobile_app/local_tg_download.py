@@ -29,26 +29,60 @@ STATE_UNKNOWN = "unknown"
 # 缓存的视频最小体积（判断"已下载"时排除缩略图/小文件）
 _MIN_DONE = 2 * 1048576
 
-_SU_CANDIDATES = ("/system/bin/su", "/debug_ramdisk/su", "/sbin/su", "su")
-_su_path = None      # None=未探测；""=探测过但不可用
+_SU_CANDIDATES = ("/system/bin/su", "/system/xbin/su", "/debug_ramdisk/su",
+                  "/sbin/su", "su")
+_su_path = None      # 探测成功后的 su 路径（失败不缓存，下次重新探测）
+_last_err = ""
 
 
 # ────────────────────────── root 命令执行 ──────────────────────────
 
-def _find_su():
-    global _su_path
-    if _su_path is not None:
-        return _su_path or None
-    for cand in _SU_CANDIDATES:
-        try:
-            p = subprocess.run([cand, "-c", "id"], capture_output=True, timeout=15)
-            out = (p.stdout or b"").decode("utf-8", "ignore")
-            if "uid=0" in out:
-                _su_path = cand
-                return cand
-        except Exception:
-            continue
-    _su_path = ""
+def _clean_env():
+    """p4a 进程会带 LD_LIBRARY_PATH / LD_PRELOAD 指向应用私有库，
+    直接 exec 系统二进制可能因链接不上而失败，这里清掉再执行 su。"""
+    env = dict(os.environ)
+    for k in ("LD_PRELOAD", "LD_LIBRARY_PATH"):
+        env.pop(k, None)
+    env["PATH"] = "/system/bin:/system/xbin:/product/bin:/sbin:" + env.get("PATH", "")
+    return env
+
+
+def _exec(args, timeout):
+    try:
+        p = subprocess.run(args, capture_output=True, timeout=timeout,
+                           env=_clean_env())
+        return (p.returncode,
+                (p.stdout or b"").decode("utf-8", "ignore"),
+                (p.stderr or b"").decode("utf-8", "ignore"))
+    except subprocess.TimeoutExpired:
+        return 124, "", "等待 root 授权超时"
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _find_su(timeout=60):
+    """探测可用的 su。首次调用会在手机上弹出 root 授权框，需用户点"允许"，
+    因此超时给足 60 秒；失败不缓存，下次任务会重新探测。"""
+    global _su_path, _last_err
+    if _su_path:
+        return _su_path
+    cands = [c for c in _SU_CANDIDATES if c == "su" or os.path.exists(c)]
+    if not cands:
+        cands = ["su"]
+    errs = []
+    for cand in cands:
+        code, out, err = _exec([cand, "-c", "id"], timeout)
+        if "uid=0" in out:
+            _su_path = cand
+            _last_err = ""
+            return cand
+        if code == 124:
+            # 授权框在等用户点击，继续试其他路径只会重复弹框
+            _last_err = "等待 root 授权超时（请在手机弹框里点“允许”）"
+            return None
+        msg = (err or out).strip().replace("\n", " ")[:60]
+        errs.append("%s -> %s" % (cand, msg or ("退出码 %d" % code)))
+    _last_err = "；".join(errs) or "未找到 su"
     return None
 
 
@@ -56,14 +90,8 @@ def _su(cmd, timeout=60):
     """以 root 执行一条 shell 命令，返回 (code, stdout, stderr)。"""
     su = _find_su()
     if not su:
-        return 1, "", "未获取 root 权限"
-    try:
-        p = subprocess.run([su, "-c", cmd], capture_output=True, timeout=timeout)
-        return (p.returncode,
-                (p.stdout or b"").decode("utf-8", "ignore"),
-                (p.stderr or b"").decode("utf-8", "ignore"))
-    except Exception as e:
-        return 1, "", str(e)
+        return 1, "", "未获取 root 权限（%s）" % (_last_err or "su 不可用")
+    return _exec([su, "-c", cmd], timeout)
 
 
 def _tg_pkg():
@@ -84,11 +112,33 @@ def _cache_dir():
     return "/sdcard/Android/data/%s/cache" % pkg if pkg else ""
 
 
+def probe():
+    """探测运行环境，返回 (可用, Telegram包名, 说明文字)。
+    说明文字用于在客户端日志里直接显示问题原因。"""
+    su = _find_su()
+    if not su:
+        return False, None, ("root 授权不可用：%s（首次会弹 root 授权框，"
+                             "请在手机上点“允许”）" % (_last_err or "su 未找到"))
+    pkg = _tg_pkg()
+    if not pkg:
+        return False, None, "未找到官方 Telegram（已查：%s）" % ",".join(TG_PKGS)
+    return True, pkg, "root=%s，Telegram=%s" % (su, pkg)
+
+
 def available():
     """本机模拟点击是否可用：有 root + 已安装官方 Telegram。"""
-    if not _find_su():
-        return False
-    return bool(_tg_pkg())
+    return probe()[0]
+
+
+def _foreground_line():
+    """当前前台窗口信息（用于确认 Telegram 是否真的被拉起）。"""
+    code, out, _ = _su("dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp'",
+                       timeout=25)
+    if not out.strip():
+        code, out, _ = _su("dumpsys activity activities 2>/dev/null | grep -E 'mResumedActivity|topResumedActivity'",
+                           timeout=25)
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    return line[:160]
 
 
 # ────────────────────────── 截图（raw）解析 ──────────────────────────
@@ -332,10 +382,11 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
     返回 (dest_path, error)：成功时 error 为空串；失败返回 (None, 原因)。
     progress(done_bytes, speed_mb_s) 为进度回调。
     """
-    if not available():
-        return None, "未获取 root 权限或未安装官方 Telegram"
-    pkg = _tg_pkg()
+    ok, pkg, detail = probe()
+    if not ok:
+        return None, detail
     cdir = _cache_dir()
+    log("[本机TG] 环境正常：%s" % detail)
 
     channel = str(channel or "").lstrip("@")
     if not channel or not msg_id:
@@ -358,9 +409,19 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
     _su("input keyevent 224", timeout=20)
     _su("wm dismiss-keyguard", timeout=20)
     time.sleep(1)
-    _su("am start -a android.intent.action.VIEW -d '%s' -p %s" % (link, pkg),
-        timeout=30)
-    time.sleep(8)
+    start_cmd = ("am start -W --user 0 -a android.intent.action.VIEW "
+                 "-d '%s' -p %s" % (link, pkg))
+    _su(start_cmd, timeout=40)
+    time.sleep(5)
+    fg = _foreground_line()
+    if fg and pkg not in fg:
+        log("[本机TG] Telegram 未在前台（当前：%s），重新拉起" % fg)
+        _su(start_cmd, timeout=40)
+        time.sleep(6)
+        fg = _foreground_line()
+    log("[本机TG] 当前前台：%s" % (fg or "未知"))
+    if fg and pkg not in fg:
+        log("[本机TG] 仍未确认 Telegram 在前台，继续按截图状态判断")
     if cancel is not None and cancel.is_set():
         return None, "已取消"
 
