@@ -16,6 +16,54 @@ from .state import _UploadProgressReader, _update_task
 
 API_BASE = "https://drive.kdocs.cn/api/v3"
 
+_HASH_CHUNK = 1024 * 1024   # 计算哈希时的分块大小
+_UPLOAD_CHUNK = 256 * 1024  # 上传时的分块大小
+
+
+def _hash_file(path):
+    """分块读取文件计算 md5/sha1，避免把大文件读入内存。"""
+    md5 = hashlib.md5()
+    sha1 = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_HASH_CHUNK)
+            if not chunk:
+                break
+            md5.update(chunk)
+            sha1.update(chunk)
+    return md5.hexdigest(), sha1.hexdigest()
+
+
+class _FileProgressReader:
+    """从磁盘文件分块读取并上报进度（内存占用恒定，适合大文件上传）。"""
+
+    def __init__(self, path, task_id, total_size):
+        self._fp = open(path, "rb")
+        self._task_id = task_id
+        self._total = total_size
+        self._pos = 0
+        self._t0 = time.time()
+
+    def __len__(self):
+        # requests 依赖 __len__ 推断 Content-Length，避免改用 chunked 传输
+        return self._total
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = _UPLOAD_CHUNK
+        chunk = self._fp.read(size)
+        if chunk:
+            self._pos += len(chunk)
+            elapsed = max(time.time() - self._t0, 0.01)
+            _update_task(self._task_id, uploaded=self._pos, speed=self._pos / elapsed)
+        return chunk
+
+    def close(self):
+        try:
+            self._fp.close()
+        except Exception:
+            pass
+
 
 class WPSClient:
     def __init__(self, session, csrf_token):
@@ -40,11 +88,20 @@ class WPSClient:
         return r.json().get("files", []) if r.status_code == 200 else []
 
     def get_all_files(self, group_id, parent_id=None):
-        all_files, offset, page = [], 0, 200
-        while True:
+        all_files, offset, page, seen, pages = [], 0, 200, set(), 0
+        # 部分企业账号的分页参数会被服务端忽略，导致重复返回同一页；按 id 去重并限制页数
+        while pages < 200:
             batch = self.get_files(group_id, parent_id, offset, page)
-            all_files.extend(batch)
-            if len(batch) < page:
+            added = 0
+            for f in batch:
+                fid = f.get("id")
+                if fid in seen:
+                    continue
+                seen.add(fid)
+                all_files.append(f)
+                added += 1
+            pages += 1
+            if len(batch) < page or added == 0:
                 break
             offset += page
         return all_files
@@ -209,16 +266,24 @@ class WPSClient:
                     return 500, {"error": str(e)}
                 time.sleep(min(2 ** attempt, 15))
 
-    def upload_file_with_progress(self, group_id, parent_id, file_data, file_name, file_size, task_id):
-        """v5 三步上传，step2 通过 _UploadProgressReader 上报进度"""
+    def upload_file_with_progress(self, group_id, parent_id, file_data, file_name, file_size,
+                                  task_id, file_path=None):
+        """v5 三步上传并上报进度。
+
+        file_path 不为空时从磁盘分块读取（推荐，大文件不占内存）；
+        否则沿用原来的 bytes 模式。"""
         import sys as _sys
         DRIVE_V5 = "https://drive.kdocs.cn"
         try:
             pid = int(parent_id) if parent_id and str(parent_id).strip() else 0
         except ValueError:
             pid = 0
-        md5_sum = hashlib.md5(file_data).hexdigest()
-        sha1_sum = hashlib.sha1(file_data).hexdigest()
+        if file_path:
+            _update_task(task_id, stage="hash")
+            md5_sum, sha1_sum = _hash_file(file_path)
+        else:
+            md5_sum = hashlib.md5(file_data).hexdigest()
+            sha1_sum = hashlib.sha1(file_data).hexdigest()
         try:
             gid = int(group_id)
         except ValueError:
@@ -261,9 +326,17 @@ class WPSClient:
                 step2_timeout = max(60, int(file_size / 1024 / 500))
                 step2_timeout = min(step2_timeout, 7200)
                 _update_task(task_id, stage="step2")
-                reader = _UploadProgressReader(file_data, task_id, file_size)
-                r2 = self.s.put(plan["url"], data=reader, headers=headers2,
-                                timeout=(30, step2_timeout))
+                if file_path:
+                    reader = _FileProgressReader(file_path, task_id, file_size)
+                    try:
+                        r2 = self.s.put(plan["url"], data=reader, headers=headers2,
+                                        timeout=(30, step2_timeout))
+                    finally:
+                        reader.close()
+                else:
+                    reader = _UploadProgressReader(file_data, task_id, file_size)
+                    r2 = self.s.put(plan["url"], data=reader, headers=headers2,
+                                    timeout=(30, step2_timeout))
                 r2.raise_for_status()
                 spec = plan.get("response", {})
                 key = self._extract_response(spec.get("args_key"), r2)
@@ -403,15 +476,25 @@ class WPSClient:
             pass
 
     def get_groups(self):
-        all_groups, offset = [], 0
-        while True:
+        all_groups, offset, seen, pages = [], 0, set(), 0
+        # 企业账号下 /groups 会忽略 offset、反复返回同一批组，必须去重并限制页数，
+        # 否则会无限请求且接口永不返回。
+        while pages < 100:
             r = self.s.get(f"{API_BASE}/groups", params={"count": 200, "offset": offset}, timeout=15)
             if r.status_code != 200:
                 break
             data = r.json()
-            groups = data.get("groups", [])
-            all_groups.extend(groups)
-            if not data.get("has_next"):
+            groups = data.get("groups") or []
+            added = 0
+            for g in groups:
+                gid = g.get("id")
+                if gid in seen:
+                    continue
+                seen.add(gid)
+                all_groups.append(g)
+                added += 1
+            pages += 1
+            if not groups or data.get("has_next") is not True or added == 0:
                 break
             offset += len(groups)
         return all_groups

@@ -509,6 +509,13 @@ class TransferEngine:
 
         if progress_cb:
             progress_cb(downloaded, file_size, "下载完成")
+        # 下载完成后删除网盘里的临时转存文件
+        try:
+            _cleanup = getattr(self.src, "cleanup", None)
+            if _cleanup:
+                _cleanup(share_url, file_name=file_name)
+        except Exception:
+            pass
         return final_path, None
 
     def upload_file(self, local_path, file_name, progress_cb=None,
@@ -994,6 +1001,23 @@ class TransferEngine:
 
                     gate.acquire()  # 等上一个文件开始上传后，本文件才开始下载
                     _queued = False
+                    # ── 本地已有下载好的目标文件（上次上传失败/中断遗留）：
+                    # 跳过重新下载，直接进入上传队列。上传失败不会删除本地文件，
+                    # 若这里再从头下载，重传时会白白重下一整集。
+                    _rn0 = (rename_map or {}).get(name, "")
+                    _expect = f.get("size") or 0
+                    _cand = os.path.join(self.save_dir, _rn0) if _rn0 else ""
+                    if (_cand and os.path.exists(_cand) and os.path.getsize(_cand) > 0
+                            and (not _expect or os.path.getsize(_cand) == _expect)):
+                        _csz = os.path.getsize(_cand)
+                        if progress_cb:
+                            progress_cb("download", _csz, _csz, "%s 本地已存在，跳过下载" % seq)
+                        # 先提示“已下载完成，等待上传”，再入队（上传线程取走时会清空）
+                        if progress_cb:
+                            progress_cb("queued", 0, 0, "%s 已下载完成，等待上传" % seq)
+                        q.put((idx, name, _rn0, [(_cand, _rn0)], None, True))
+                        _queued = True
+                        continue
                     try:
                         local_path, derr = self.download_file(
                             share_url, f, share_passwd, _dcb, cancel_check)
@@ -1044,7 +1068,10 @@ class TransferEngine:
                             vfs = vfs2
 
                         rn = (rename_map or {}).get(name, "")
-                        q.put((idx, name, rn, vfs, extract_dir))
+                        # 先提示“已下载完成，等待上传”，再入队（上传线程取走时会清空）
+                        if progress_cb:
+                            progress_cb("queued", 0, 0, "%s 已下载完成，等待上传" % seq)
+                        q.put((idx, name, rn, vfs, extract_dir, True))
                         _queued = True
                     finally:
                         # 未入队（下载/解压失败、异常）时放行闸门，让下一个文件继续
@@ -1058,12 +1085,17 @@ class TransferEngine:
             try:
                 while True:
                     try:
-                        idx, name, rn, vfs, extract_dir = q.get(timeout=0.5)
+                        _item = q.get(timeout=0.5)
+                        idx, name, rn, vfs, extract_dir = _item[:5]
+                        _gate_held = _item[5] if len(_item) > 5 else True
                     except _queue.Empty:
                         if download_done.is_set() and q.empty():
                             return
                         continue
-                    gate.release()  # 取走即开始上传，放行下一个文件开始下载
+                    if _gate_held:
+                        gate.release()  # 取走即开始上传，放行下一个文件开始下载
+                    if progress_cb:
+                        progress_cb("queued", 0, 0, "")  # 已开始上传，清空“等待上传”
                     seq = "[%d/%d] %s" % (idx + 1, total, name)
 
                     def _ucb(stage, dl, sz, speed):

@@ -9,6 +9,7 @@ import threading
 import json
 import uuid
 import secrets
+from urllib.parse import quote
 from datetime import datetime
 from .state import *
 from .utils import *
@@ -26,7 +27,14 @@ def admin_favicon():
 @bp.route("/api/admin/log")
 @login_required
 def api_admin_log():
-    from app import get_log_buffer
+    # 包模式（python -m server.app）下模块名是 server.app，不能直接 `import app`
+    try:
+        from .app import get_log_buffer
+    except Exception:
+        try:
+            from app import get_log_buffer
+        except Exception:
+            return jsonify({"success": True, "logs": [], "total": 0})
     level = (request.args.get("level") or "ALL").upper()
     q = (request.args.get("q") or "").strip().lower()
     try:
@@ -51,7 +59,7 @@ def api_admin_log():
 def admin_login_page():
     if session.get("logged_in"):
         return redirect(url_for("admin.admin_settings"))
-    return render_template("admin_login.html")
+    return render_template("admin_login.html", build=SERVER_BUILD)
 
 @bp.route("/api/login", methods=["POST"])
 def api_login():
@@ -60,6 +68,7 @@ def api_login():
     password = data.get("password", "")
     cfg = load_config()
     if username == cfg["username"] and hashlib.sha256(password.encode()).hexdigest() == cfg["password"]:
+        session.permanent = True
         session["logged_in"] = True
         session["username"] = username
         return jsonify({"success": True})
@@ -675,10 +684,13 @@ def api_public_upload_file():
         client, err = get_wps_client()
         if err:
             return jsonify({"success": False, "message": err}), 500
+    temp_path = None
     try:
-        file_data = file.read()
+        # 分块落盘，避免把整个文件读进内存（手机容器内存有限，大文件会 OOM）
+        _cfg = load_config()
+        temp_dir = _cfg.get("temp_download_dir") or os.path.join(DATA_DIR, "temp_downloads")
+        temp_path, file_size = save_upload_to_temp(file, temp_dir)
         file_name = file.filename
-        file_size = len(file_data)
         target_pid = parent_id
 
         # 处理 relative_path：逐层创建子目录（在后台线程前同步完成，因为需要 list 操作）
@@ -720,7 +732,8 @@ def api_public_upload_file():
                       f"csrf_head={str(client.csrf)[:8]!r} storage_used={bool(target_storage)}",
                       flush=True, file=_sys.stderr)
                 status, result = client.upload_file_with_progress(
-                    DEFAULT_GROUP_ID, target_pid, file_data, file_name, file_size, task_id)
+                    DEFAULT_GROUP_ID, target_pid, None, file_name, file_size, task_id,
+                    file_path=temp_path)
                 if status not in (200, 201, 204):
                     _update_task(task_id, done=True, success=False,
                                  error=str(result.get("error") or result.get("message") or "上传失败"))
@@ -728,6 +741,12 @@ def api_public_upload_file():
             except Exception as e:
                 traceback.print_exc()
                 _update_task(task_id, done=True, success=False, error=str(e))
+            finally:
+                # 上传结束（无论成败）删除临时文件，避免磁盘被大文件占满
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
         threading.Thread(target=_bg_upload, daemon=True).start()
         print(f"[ROUTE] task_id={task_id}, phase1 done", flush=True, file=_sys.stderr)
@@ -735,6 +754,11 @@ def api_public_upload_file():
                         "name": file_name, "total": file_size})
     except Exception as e:
         traceback.print_exc()
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         return jsonify({"success": False, "message": str(e)}), 500
 
 @bp.route("/api/admin/files/upload", methods=["POST"])
@@ -753,17 +777,31 @@ def api_admin_upload_file():
         client, err = get_wps_client()
         if err:
             return jsonify({"success": False, "message": err}), 500
+    temp_path = None
     try:
-        file_data = file.read()
+        # 分块落盘后从磁盘流式上传，避免整文件驻留内存
+        _cfg = load_config()
+        temp_dir = _cfg.get("temp_download_dir") or os.path.join(DATA_DIR, "temp_downloads")
+        temp_path, file_size = save_upload_to_temp(file, temp_dir)
         file_name = file.filename
-        file_size = len(file_data)
-        status, result = client.upload_file(DEFAULT_GROUP_ID, parent_id, file_data, file_name, file_size)
+        task_id = uuid.uuid4().hex[:12]
+        _update_task(task_id, name=file_name, total=file_size, uploaded=0, stage="prepare",
+                     done=False, success=False, speed=0)
+        status, result = client.upload_file_with_progress(
+            DEFAULT_GROUP_ID, parent_id, None, file_name, file_size, task_id,
+            file_path=temp_path)
         if status in (200, 201, 204):
             return jsonify({"success": True})
         msg = result.get("result") or result.get("message") or "上传失败"
         return jsonify({"success": False, "message": str(msg)}), status
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 @bp.route("/api/admin/tasks/strm/status")
 @login_required
@@ -843,7 +881,7 @@ def api_admin_strm_start():
                 _task_status["current"] = fname
 
                 try:
-                    strm_url = f"{strm_base}{url_prefix}/{fid}"
+                    strm_url = f"{strm_base}{url_prefix}/{fid}/{quote(f.get('fname') or f.get('name') or 'file')}"
                     fname_fixed = fname.replace("（", "(").replace("）", ")")
                     # 仅过滤 Windows 文件名非法字符，保留 = + : , [tmdbid=xxx] 等元数据符号
                     safe_name = _safe_name(fname_fixed)

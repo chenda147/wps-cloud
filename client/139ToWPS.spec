@@ -10,10 +10,17 @@ hiddenimports = [
     'chase_engine',
     'config_helper',
     'quark_core',
+    'quark_saver',
     'yidong_core',
     'wps_uploader',
+    'tg_downloader',
+    'phone_download',
 ]
 tmp_ret = collect_all('Crypto')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('telethon')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('qrcode')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('rarfile')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

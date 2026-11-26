@@ -2,10 +2,11 @@
 夸克网盘分享链接核心模块
 - 解析分享链接（https://pan.quark.cn/s/xxxx）
 - 列出分享文件（sharepage/detail，支持分页/嵌套）
-- 获取下载直链（file/download，返回 download_url）
+- 通过项目内置转存器（quark_saver）把分享转存进自己网盘，再从自己网盘取直链
+- 下载完成后删除网盘里的临时文件
 
 鉴权方式：登录 cookie（一个 cookie 通吃所有夸克分享，类似 139 的单个 token）
-直链有效期较短且可能限速，因此采用"下载时即时取链"，契合主程序架构。
+分享文件的直链很难直接解析，因此转存交给 QAS，本项目只做"取链 + 下载 + 清理"。
 
 接口参考社区成熟实现（quark-auto-save / QuarkPanTool），均为夸克非公开分享 API。
 """
@@ -15,7 +16,10 @@ import sys
 import time
 import json
 import random
+import threading
 import requests
+
+from quark_saver import QuarkSaver
 
 BASE = "https://drive-pc.quark.cn"
 SHARE_HOST = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage"
@@ -47,8 +51,11 @@ def _rand_dt() -> int:
 class QuarkShareClient:
     """夸克网盘分享链接客户端（登录 cookie 即可下载任意夸克分享）"""
 
-    def __init__(self, cookie: str):
+    def __init__(self, cookie: str, saver=None):
         self.cookie = (cookie or "").strip()
+        self.saver = saver if saver is not None else QuarkSaver(self.cookie)
+        self._transferred = {}
+        self._lock = threading.Lock()
         self.download_referer = "https://pan.quark.cn/"
         self._session = requests.Session()
         self._session.headers.update({
@@ -193,6 +200,94 @@ class QuarkShareClient:
         return {"ok": True, "items": all_items, "count": len(all_items)}
 
     # ──────────────────────────────────────────────
+    #  转存到自己网盘 → 取直链
+    # ──────────────────────────────────────────────
+    def _ensure_transfer(self, share_url: str, share_passwd: str = "") -> dict:
+        """确保分享已转存到自己网盘，返回 {"ok","dir_fid"}。同一分享只转存一次。"""
+        parsed = self.parse_share_url(share_url)
+        if not parsed.get("ok"):
+            return parsed
+        pwd_id = parsed["pwd_id"]
+        with self._lock:
+            if pwd_id in self._transferred:
+                return {"ok": True, "dir_fid": self._transferred[pwd_id]}
+            res = self.saver.ensure_transfer(share_url, share_passwd)
+            if not res.get("ok"):
+                return res
+            self._transferred[pwd_id] = res["dir_fid"]
+            return res
+
+    def _own_download_url(self, fid: str) -> dict:
+        """用自己网盘的 fid 取直链（无需 stoken）"""
+        params = dict(COMMON_PARAMS)
+        params.update({"sys": "win32", "ve": "2.5.56", "ut": "", "guid": ""})
+        headers = {
+            "User-Agent": UA,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Accept-Language": "zh-CN",
+            "Origin": "https://pan.quark.cn",
+            "Referer": "https://pan.quark.cn/",
+            "Cookie": self.cookie,
+        }
+        try:
+            r = self._session.post(f"{FILE_HOST}/download", params=params,
+                                   json={"fids": [fid], "resolutions": "2"},
+                                   headers=headers, timeout=30)
+            js = r.json()
+        except Exception as e:
+            return {"ok": False, "msg": f"获取自己网盘直链失败: {e}"}
+        if js.get("code") not in (0, 200) and js.get("status") not in (0, 200, None):
+            return {"ok": False, "msg": js.get("message", "获取自己网盘直链失败")}
+        data = js.get("data", {})
+        dl = data[0] if isinstance(data, list) and data else data
+        if isinstance(dl, dict) and not dl.get("download_url") and isinstance(dl.get("data"), dict):
+            dl = dl["data"]
+        url = (dl or {}).get("download_url") or (dl or {}).get("url") or ""
+        if not url:
+            return {"ok": False, "msg": f"未获取到 download_url: {str(js)[:300]}"}
+        return {"ok": True, "url": url,
+                "headers": {
+                    "User-Agent": headers["User-Agent"],
+                    "Referer": "https://pan.quark.cn/",
+                    "Cookie": self.cookie,
+                }}
+
+    def _get_url_via_qas(self, share_url: str, file_name: str,
+                         share_passwd: str = "") -> dict:
+        tr = self._ensure_transfer(share_url, share_passwd)
+        if not tr.get("ok"):
+            return {"ok": False, "msg": f"转存失败: {tr.get('msg')}"}
+        found = self.saver.find_file(tr["dir_fid"], file_name)
+        if not found.get("ok"):
+            return {"ok": False, "msg": found.get("msg", "网盘中未找到文件")}
+        res = self._own_download_url(found["fid"])
+        if res.get("ok"):
+            res["fid"] = found["fid"]
+        return res
+
+    def cleanup(self, share_url: str, file_name: str = "") -> dict:
+        """下载完成后删除网盘里的临时文件（进回收站，仍占容量，需定期清空）"""
+        if not file_name:
+            return {"ok": False, "msg": "无需清理"}
+        parsed = self.parse_share_url(share_url)
+        if not parsed.get("ok"):
+            return parsed
+        dir_fid = self._transferred.get(parsed["pwd_id"])
+        if not dir_fid:
+            return {"ok": False, "msg": "未转存过，无需清理"}
+        found = self.saver.find_file(dir_fid, file_name)
+        if not found.get("ok"):
+            return found
+        res = self.saver.delete([found["fid"]])
+        try:
+            if res.get("ok") and self.saver.is_empty(dir_fid):
+                self.saver.delete([dir_fid])
+        except Exception:
+            pass
+        return res
+
+    # ──────────────────────────────────────────────
     #  获取下载直链
     # ──────────────────────────────────────────────
     def get_share_download_url(self, share_url: str, file_id: str,
@@ -200,9 +295,12 @@ class QuarkShareClient:
                                share_passwd: str = "") -> dict:
         """获取夸克分享文件下载直链 download_url。
 
-        夸克下载流程：file/download (POST, 传 fid) -> 返回 download_url。
-        风控码 23018 时换 UA 重试一次。
+        流程：把分享转存到自己网盘 → 在自己网盘定位文件 → file/download 取直链。
+        未传文件名时退回原逻辑（直接对分享文件取直链）。
         """
+        if file_name:
+            return self._get_url_via_qas(share_url, file_name, share_passwd)
+
         fid = share_path or file_id
         if not fid:
             return {"ok": False, "msg": "缺少文件 fid"}

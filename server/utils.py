@@ -13,6 +13,7 @@ server/utils.py
 import os
 import json
 import re
+import time
 import hashlib
 
 from .state import CONFIG_FILE, COOKIE_FILE
@@ -298,6 +299,7 @@ from flask import session, redirect, url_for, request, jsonify
 
 from .state import (
     DATA_DIR, DEFAULT_GROUP_ID, STORAGES_FILE, CLOUD_ACCOUNTS_FILE, _mount_root_cache,
+    SERVER_BUILD,
 )
 from .models import WPSClient
 
@@ -315,12 +317,37 @@ def _check_password(stored, given):
     return stored == given
 
 
+def _auth_diag_info():
+    """401 时附带的诊断信息：cookie 是否带到、session 里有什么、当前构建版本。
+    前端拿到后展示给用户，可一眼区分‘cookie 没带’还是‘密钥/进程变了’。"""
+    try:
+        from flask import current_app
+        ck_name = current_app.config.get("SESSION_COOKIE_NAME", "session")
+    except Exception:
+        ck_name = "wps_cloud_sid"
+    return {
+        "build": SERVER_BUILD,
+        "cookie_present": bool((request.cookies or {}).get(ck_name)),
+        "cookie_name": ck_name,
+        "session_keys": sorted(session.keys()),
+        "logged_in": bool(session.get("logged_in")),
+        "admin_logged_in": bool(session.get("admin_logged_in")),
+        "host": request.host,
+        "path": request.path,
+    }
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*a, **k):
         if not session.get("admin_logged_in") and not session.get("logged_in"):
+            diag = _auth_diag_info()
+            print(f"[auth-401] cookie={diag['cookie_present']} "
+                  f"sid={diag['logged_in']} adm={diag['admin_logged_in']} "
+                  f"keys={diag['session_keys']} host={diag['host']} "
+                  f"path={diag['path']} build={diag['build']}", flush=True)
             if request.path.startswith("/api/"):
-                return jsonify({"success": False, "message": "未登录"}), 401
+                return jsonify({"success": False, "message": "未登录", "_diag": diag}), 401
             return redirect(url_for("admin.admin_login_page"))
         return f(*a, **k)
     return wrapper
@@ -389,6 +416,50 @@ def _resolve_folder_id_with_client(client, mount_path):
     return cur
 
 
+def save_upload_to_temp(file_storage, temp_dir, chunk_size=1024 * 1024):
+    """把上传流分块写入临时文件，返回 (path, size)。
+
+    避免 `file.read()` 把整个大文件读进内存（手机容器/小内存机器上会 OOM）。"""
+    os.makedirs(temp_dir, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="upload_", suffix=".part", dir=temp_dir)
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = file_storage.stream.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+    except Exception:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise
+    return path, size
+
+
+def cleanup_temp_dir(path, max_age_sec=72 * 3600):
+    """删除临时目录中超过 max_age_sec 的残留文件，返回删除数量。"""
+    removed = 0
+    try:
+        now = time.time()
+        for name in os.listdir(path):
+            fp = os.path.join(path, name)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                if now - os.path.getmtime(fp) > max_age_sec:
+                    os.remove(fp)
+                    removed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return removed
+
+
 def _get_mount_client_and_root(mount_ctx_or_storage_id):
     """根据挂载上下文，返回 (WPSClient, real_root_id)。失败返回 (None, None)。"""
     sid = mount_ctx_or_storage_id[7:] if mount_ctx_or_storage_id.startswith("_mount_") else mount_ctx_or_storage_id
@@ -428,4 +499,5 @@ __all__ = [
     "get_config", "_check_password", "login_required", "format_size",
     "_load_storages", "_save_storages", "_load_cloud_accounts", "_save_cloud_accounts",
     "_resolve_folder_id_with_client", "_get_mount_client_and_root",
+    "atomic_write_json", "save_upload_to_temp", "cleanup_temp_dir",
 ]

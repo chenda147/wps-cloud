@@ -608,6 +608,10 @@ def api_admin_chase_list():
         t.setdefault("last_result", "")
         t.setdefault("history", [])  # 结构化检查/下载历史
         t.setdefault("episodes_filter", "")  # 指定集数筛选，如 "1,2,3"
+        t.setdefault("tg_search", False)  # 是否使用 TG 搜索作为文件源
+        t.setdefault("tg_query", "")      # TG 搜索关键词（空=用片名）
+        t.setdefault("tg_channels", [])   # 搜索范围（空=全部频道）
+        t.setdefault("tg_limit", 30)      # 每频道条数
         t.setdefault("created_at", "")
         # ── 失败预警字段 ──
         t.setdefault("last_success_ts", "")
@@ -669,6 +673,10 @@ def api_admin_chase_create():
             "year": data.get("year", "").strip(),
             "schedule": data.get("schedule", "DAILY:01:00").strip(),
             "episodes_filter": data.get("episodes_filter", "").strip(),
+            "tg_search": bool(data.get("tg_search")),
+            "tg_query": data.get("tg_query", "").strip(),
+            "tg_channels": data.get("tg_channels") or [],
+            "tg_limit": int(data.get("tg_limit") or 30),
             "enabled": True,
             "last_check": "",
             "last_result": "",
@@ -696,9 +704,16 @@ def api_admin_chase_update(cid):
                 for k in ("name", "share_url", "share_passwd", "ep_pattern",
                           "rename_template", "show_folder", "category", "tmdb_id",
                           "target_client", "sub_path", "year", "schedule",
-                          "episodes_filter"):
+                          "episodes_filter", "tg_query", "tg_channels"):
                     if k in data and data[k] is not None:
                         t[k] = data[k].strip() if isinstance(data[k], str) else data[k]
+                if "tg_search" in data:
+                    t["tg_search"] = bool(data.get("tg_search"))
+                if "tg_limit" in data:
+                    try:
+                        t["tg_limit"] = int(data.get("tg_limit") or 30)
+                    except Exception:
+                        t["tg_limit"] = 30
                 if "base_ep" in data:
                     t["base_ep"] = int(data["base_ep"])
                 if "progress_ep" in data and data["progress_ep"] is not None:
@@ -782,27 +797,40 @@ def api_admin_chase_run_all():
         task = _CLIENT_TASKS.get(tid)
         if task and task.get("status") in ("pending", "running") and task.get("chase_id"):
             active_chase.add(task.get("chase_id"))
-    created, skipped = [], []
+    runnable, created, skipped, resumed = [], [], [], []
     for t in tasks:
         t.setdefault("enabled", True)
         if not t.get("enabled"):
             skipped.append({"id": t.get("id"), "name": t.get("name", ""), "reason": "已停用"})
             continue
-        if t.get("stopped"):
-            skipped.append({"id": t.get("id"), "name": t.get("name", ""), "reason": "已停止"})
-            continue
         if t.get("id") in active_chase:
             skipped.append({"id": t.get("id"), "name": t.get("name", ""), "reason": "已有任务进行中"})
             continue
+        # ★ 一键运行 = 恢复并运行：先清除"已停止"标记，否则一键停止后再点一键运行
+        #   会被 stopped 规则直接跳过（前端提示"暂无可运行"），用户以为按钮失效。
+        if t.get("stopped"):
+            t["stopped"] = False
+            resumed.append(t.get("name", t.get("id", "")))
+        runnable.append(t)
+    # 先落盘恢复状态再触发检查：检查线程运行时会自行读取/写回追更文件，
+    # 若放到后面保存会用本端旧快照覆盖检查线程刚写入的结果。
+    if resumed:
+        _save_chase(tasks)
+    for t in runnable:
         try:
             # 一键运行视为恢复：清除可能残留的客户端取消状态（幂等）
             _send_chase_resume_signals(t.get("id") or t.get("chase_id") or "", t)
             _create_chase_check_task(t, manual=True)
             created.append(t.get("name", t.get("id", "")))
         except Exception as e:
+            if t.get("name", t.get("id")) in resumed:
+                resumed.remove(t.get("name", t.get("id")))
             skipped.append({"id": t.get("id"), "name": t.get("name", ""), "reason": f"创建失败: {e}"})
-    msg = f"已触发 {len(created)} 个追更检查（服务端执行）" + (f"，跳过 {len(skipped)} 个" if skipped else "")
-    return jsonify({"success": True, "message": msg, "created": created, "skipped": skipped})
+    msg = (f"已触发 {len(created)} 个追更检查（服务端执行）"
+           + (f"，恢复 {len(resumed)} 个已停止任务" if resumed else "")
+           + (f"，跳过 {len(skipped)} 个" if skipped else ""))
+    return jsonify({"success": True, "message": msg, "created": created,
+                    "resumed": resumed, "skipped": skipped})
 
 @bp.route("/api/admin/chase/browse_share", methods=["GET"])
 @login_required
@@ -893,6 +921,8 @@ def api_admin_chase_preview_files():
     # 已有文件列表：编辑模板/正则后立即重预览时传入，无需重新拉分享链接
     file_names = data.get("file_names") or []
     file_sizes = data.get("file_sizes") or []
+    # TG 搜索源：用于界面展示的友好名称（字幕说明/标题），匹配仍用真实文件名
+    display_names = data.get("display_names") or []
     # 低于该大小(MB)的文件不参与预览（过滤 jpg/png/txt 等小文件被误识别）——全局配置（个人资料）
     try:
         min_size_mb = float(load_config().get("chase_min_size_mb", 0) or 0)
@@ -958,6 +988,7 @@ def api_admin_chase_preview_files():
             # 已有文件列表：编辑模板/正则后立即重预览，无需重新拉分享链接
             _names = file_names if isinstance(file_names, list) else []
             _sizes = file_sizes if isinstance(file_sizes, list) else []
+            _display_names = display_names if isinstance(display_names, list) else []
             files = []
             for _i, _n in enumerate(_names):
                 _sz = 0
@@ -966,7 +997,9 @@ def api_admin_chase_preview_files():
                         _sz = int(_sizes[_i] or 0)
                     except (ValueError, TypeError):
                         _sz = 0
-                files.append({"name": _n, "is_dir": False, "size": _sz})
+                files.append({"name": _n, "is_dir": False, "size": _sz,
+                              "display": (_display_names[_i]
+                                          if _i < len(_display_names) else "")})
             if not files:
                 return jsonify({"success": False, "message": "请提供文件名列表"}), 400
         # 文件格式过滤：只保留真实视频文件，彻底过滤 jpg/png/txt 等附件
@@ -1001,8 +1034,9 @@ def api_admin_chase_preview_files():
                     matched_text = f"EP{ep_num:02d}"
 
             # 从文件名提取季别（与下载任务一致，优先文件名而非表单值）
+            # 加边界：避免 "JOJOS07E07" 里的 S07 被误判为季数
             file_season = season
-            _sf = re.search(r'[Ss](\d{2})', fname)
+            _sf = re.search(r'(?<![A-Za-z])[Ss](\d{2})(?![0-9])', fname)
             if _sf:
                 file_season = int(_sf.group(1))
             elif file_season <= 0:
@@ -1032,6 +1066,7 @@ def api_admin_chase_preview_files():
                     renamed = manual_renames[fname]
                 matched.append({
                     "filename": fname,
+                    "display": f.get("display") or "",
                     "ep_num": ep_num,
                     "season": file_season,
                     "matched_text": matched_text or (f"EP{ep_num:02d}" if ep_num is not None else ""),
@@ -1045,6 +1080,7 @@ def api_admin_chase_preview_files():
                 # 不超过 base_ep 的标记为已追
                 matched.append({
                     "filename": fname,
+                    "display": f.get("display") or "",
                     "ep_num": ep_num,
                     "season": file_season,
                     "matched_text": "",
@@ -1076,6 +1112,7 @@ def api_admin_chase_preview_files():
                     renamed = manual_renames[fname]
                 matched.append({
                     "filename": fname,
+                    "display": f.get("display") or "",
                     "ep_num": None,
                     "season": file_season,
                     "matched_text": "",
@@ -1085,6 +1122,22 @@ def api_admin_chase_preview_files():
                     "skip": skipped,
                     "manual_ep": manual.get("ep"),
                 })
+
+        # 同一集出现多个文件时，只保留体积最大的那个（4K/1080 混发、重复投稿）
+        if not is_movie:
+            _seen = {}
+            _dedup = []
+            for m in matched:
+                if m.get("ep_num") is None:
+                    _dedup.append(m)
+                    continue
+                _k = m["ep_num"] if season > 0 else ((m.get("season") or 0), m["ep_num"])
+                if _k not in _seen:
+                    _seen[_k] = len(_dedup)
+                    _dedup.append(m)
+                elif (m.get("size") or 0) > (_dedup[_seen[_k]].get("size") or 0):
+                    _dedup[_seen[_k]] = m
+            matched = _dedup
 
         return jsonify({
             "success": True,
@@ -1212,6 +1265,30 @@ def api_admin_chase_preview_cache(cid):
                     else m
                     for m in _matched
                 ]
+                # TG 源：旧快照没有展示名，从 tg_items 的频道文案补上
+                _tg_items = t.get("tg_items") or {}
+                if t.get("tg_search") and _tg_items:
+                    _matched = [
+                        dict(m, display=m.get("display")
+                             or ((_tg_items.get(m.get("filename")) or {})
+                                 .get("display") or ""))
+                        for m in _matched
+                    ]
+                # 同一集只保留体积最大的（旧快照里可能有重复投稿/多频道同集）
+                _seen = {}
+                _dedup = []
+                for m in _matched:
+                    if m.get("ep_num") is None:
+                        _dedup.append(m)
+                        continue
+                    _k = m["ep_num"] if (t.get("season") or 0) > 0 else \
+                        ((m.get("season") or 0), m["ep_num"])
+                    if _k not in _seen:
+                        _seen[_k] = len(_dedup)
+                        _dedup.append(m)
+                    elif (m.get("size") or 0) > (_dedup[_seen[_k]].get("size") or 0):
+                        _dedup[_seen[_k]] = m
+                _matched = _dedup
                 cache = dict(cache)
                 cache["matched"] = _matched
                 cache["total"] = len(_matched)
@@ -1255,7 +1332,7 @@ def api_admin_chase_test_pattern():
             # 季数处理与正式预览 preview_files 保持一致：
             # 源文件名含 S## 优先；季数 <=0 且源文件无季标识时默认按 S01（避免模板渲染出 S00）
             file_season = season
-            _sf = re.search(r'[Ss](\d{2})', fname)
+            _sf = re.search(r'(?<![A-Za-z])[Ss](\d{2})(?![0-9])', fname)
             if _sf:
                 file_season = int(_sf.group(1))
             elif file_season <= 0:

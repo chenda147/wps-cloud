@@ -223,8 +223,14 @@ def api_wps_upload_plan():
     except Exception as e:
         return jsonify({"success": False, "message": f"创建上传计划失败: {e}"}), 500
 
+    # 清理超过 2 小时仍未提交的上传计划，避免内存泄漏
+    _now = time.time()
+    for _pid in [k for k, v in list(_UPLOAD_PLANS.items()) if _now - (v.get("_ts") or 0) > 7200]:
+        _UPLOAD_PLANS.pop(_pid, None)
+
     plan_id = uuid.uuid4().hex[:12]
     _UPLOAD_PLANS[plan_id] = {
+        "_ts": _now,
         "plan": plan,
         "wps_sess_cookie": cookie,
         "target_pid": target_pid,
@@ -532,11 +538,11 @@ def api_transfer_relay():
             if t:
                 t["stage"] = "upload"
 
-            with open(temp_path, "rb") as f:
-                file_data = f.read()
-
+            # 直接从磁盘分块上传，避免把整个文件读进内存（手机容器内存有限）
+            actual_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else file_size
             status, result = wps_client.upload_file_with_progress(
-                DEFAULT_GROUP_ID, target_pid, file_data, file_name, file_size, task_id)
+                DEFAULT_GROUP_ID, target_pid, None, file_name, actual_size, task_id,
+                file_path=temp_path)
             if status not in (200, 201, 204):
                 raise Exception(str(result.get("error") or result.get("message") or "上传失败"))
 
@@ -546,6 +552,12 @@ def api_transfer_relay():
                 t["success"] = True
                 t["stage"] = "done"
             print(f"[RELAY] complete {file_name}", flush=True, file=_sys.stderr)
+            # 下载并上传完成后，删除夸克网盘里的临时转存文件
+            if share_url and hasattr(client, "cleanup"):
+                try:
+                    client.cleanup(share_url, file_name=file_name)
+                except Exception:
+                    pass
 
         except Exception as e:
             traceback.print_exc()
@@ -555,8 +567,14 @@ def api_transfer_relay():
                 t["success"] = False
                 t["error"] = str(e)
         finally:
-            # 文件保留在临时目录，不删除
-            pass
+            # 成功后立即删除临时文件，避免大文件长期占用磁盘；
+            # 失败时保留便于排查，由启动清理任务删除超过 72 小时的残留。
+            t = _TRANSFER_RELAY.get(task_id)
+            if t and t.get("success"):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
     threading.Thread(target=_bg_relay, daemon=True).start()
     return jsonify({"success": True, "task_id": task_id, "name": file_name, "total": file_size})

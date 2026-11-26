@@ -730,6 +730,9 @@
         <button class="nav-item" data-section="notify" onclick="switchSection('notify')">
             <i class="fa-solid fa-bell"></i> 通知设置
         </button>
+        <button class="nav-item" data-section="telegram" onclick="switchSection('telegram')">
+            <i class="fa-brands fa-telegram"></i> Telegram 资源
+        </button>
         <div class="nav-divider"></div>
         <a href="/" class="nav-item">
             <i class="fa-solid fa-house"></i> 返回主页
@@ -1026,6 +1029,93 @@
             </div>
         </div>
 
+        <!-- ==================== Telegram 资源 ==================== -->
+        <div class="section" id="section-telegram">
+            <div class="section-title"><i class="fa-brands fa-telegram"></i> Telegram 资源</div>
+            <div class="section-desc">用你的 Telegram 账号搜索频道里的文件，锁定后生成消息链接。服务端只负责搜索和推送资源信息，下载由 Telegram 客户端自己完成。</div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-key"></i> 账号与登录
+                    <span id="tgLoginState" style="margin-left:auto;font-size:12px;color:var(--text2);">未检测</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>api_id</label>
+                        <input class="form-input" id="tgApiId" placeholder="1234567">
+                    </div>
+                    <div class="form-group">
+                        <label>api_hash</label>
+                        <input class="form-input" id="tgApiHash" placeholder="32 位字符串">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>代理（可选）</label>
+                        <input class="form-input" id="tgProxy" placeholder="socks5://127.0.0.1:1080">
+                        <div class="form-hint">服务器连不上 Telegram 时填写，支持 socks5:// 与 http://</div>
+                    </div>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="saveTgConfig()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>
+
+                <style>#tgQrImg svg{width:220px;height:220px;display:block;}</style>
+                <div style="margin-top:18px;border-top:1px dashed var(--border,#333);padding-top:14px;">
+                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;"><i class="fa-solid fa-qrcode"></i> 扫码登录（推荐，免验证码）</div>
+                    <div class="form-hint" style="margin-bottom:8px;">用手机 Telegram 打开「设置 → 设备 → 扫描二维码」，扫下方二维码并确认，服务端直接拿到已登录会话，全程不需要任何验证码。</div>
+                    <button class="btn btn-primary btn-sm" onclick="tgQrStart()"><i class="fa-solid fa-qrcode"></i> 生成登录二维码</button>
+                    <button class="btn btn-outline btn-sm" onclick="tgQrCancel()">取消</button>
+                    <div id="tgQrBox" style="display:none;margin-top:12px;">
+                        <div id="tgQrImg" style="background:#fff;padding:10px;border-radius:8px;display:inline-block;"></div>
+                        <div id="tgQrTip" class="form-hint" style="margin-top:8px;"></div>
+                        <div id="tgQrPwd" style="display:none;margin-top:8px;max-width:260px;">
+                            <input class="form-input" type="password" id="tgQrPassword" placeholder="两步验证密码">
+                            <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="tgQrSubmitPwd()">提交密码</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:18px;border-top:1px dashed var(--border,#333);padding-top:14px;">
+                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;"><i class="fa-solid fa-download"></i> 客户端下载会话</div>
+                    <div class="form-hint" style="margin-bottom:8px;">
+                        客户端下载 TG 文件使用独立会话，与上方搜索账号互不影响（同一会话不能同时给两个客户端，多客户端请各自分配）。当前状态：<b id="tgClientSessState">未配置</b>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="tgQrStartClient()"><i class="fa-solid fa-qrcode"></i> 扫码添加下载会话</button>
+                </div>
+
+                <div id="tgAccountInfo" style="display:none;margin-top:16px;padding:12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid var(--border,#333);font-size:13px;line-height:1.9;">
+                    <div style="display:flex;align-items:center;margin-bottom:6px;">
+                        <b style="flex:1;">已登录账号</b>
+                        <span id="tgAccValid" style="font-size:12px;"></span>
+                    </div>
+                    <div><b>昵称：</b><span id="tgAccName">-</span></div>
+                    <div><b>ID：</b><span id="tgAccId">-</span></div>
+                    <div><b>用户名：</b><span id="tgAccUsername">-</span></div>
+                    <div><b>手机号：</b><span id="tgAccPhone">-</span></div>
+                    <div style="margin-top:8px;"><button class="btn btn-danger btn-sm" onclick="tgLogout()"><i class="fa-solid fa-right-from-bracket"></i> 退出登录</button></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-satellite-dish"></i> 频道管理
+                    <span id="tgChannelCount" style="margin-left:auto;font-size:12px;color:var(--text2);"></span>
+                </div>
+                <div class="form-row" style="align-items:flex-end;">
+                    <div class="form-group" style="flex:3;">
+                        <label>频道标识</label>
+                        <input class="form-input" id="tgChannelInput" placeholder="@channel 或 -1001234567890 或 t.me/xxx" onkeydown="if(event.key==='Enter'){addTgChannel();}">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>&nbsp;</label>
+                        <button class="btn btn-primary btn-sm" style="width:100%;" onclick="addTgChannel()"><i class="fa-solid fa-plus"></i> 添加</button>
+                    </div>
+                </div>
+                <div class="form-hint" style="margin-bottom:10px;">账号需要已加入该频道（私有频道先加入再用 @username 或频道ID）。</div>
+                <div id="tgChannelList"><div class="empty-hint">还没有频道，添加后即可搜索</div></div>
+            </div>
+
+        </div>
+
     </div>
 </div>
 
@@ -1160,6 +1250,10 @@
         <input type="hidden" id="chaseSubPath" value="">
         <input type="hidden" id="chaseEpPattern" value="">
         <input type="hidden" id="chaseRenameTemplate" value="">
+        <input type="hidden" id="chaseTgSearch" value="">
+        <input type="hidden" id="chaseTgQuery" value="">
+        <input type="hidden" id="chaseTgChannels" value="">
+        <input type="hidden" id="chaseTgLimit" value="30">
 
         <div class="m-sec">
             <div class="form-group" style="position:relative;">
@@ -1357,6 +1451,20 @@
             <textarea class="form-input mono" id="pvManualFiles" rows="4" placeholder="每行一个文件名，例如:&#10;某剧 E186.mp4&#10;某剧 第187话.mkv&#10;某剧 188.mp4&#10;13.mp4" style="font-size:12px;"></textarea>
             <button type="button" class="btn btn-sm btn-primary" onclick="pvTestPattern()" style="margin-top:6px;">测试匹配</button>
         </div>
+        <!-- TG 搜索源 -->
+        <div style="margin-top:10px;border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="pvTgSearch" onchange="pvSyncToForm();pvToggleTgSearch()">
+                <span><i class="fa-brands fa-telegram"></i> TG搜索（用 Telegram 频道搜索结果作为文件源）</span>
+            </label>
+            <div id="pvTgFields" style="display:none;margin-top:8px;gap:6px;flex-wrap:wrap;">
+                <input class="form-input" id="pvTgQuery" placeholder="搜索关键词（留空=片名）" style="flex:1;min-width:180px;" oninput="pvSyncToForm()">
+                <input class="form-input" id="pvTgChannels" placeholder="频道（逗号分隔，留空=全部频道）" style="flex:1;min-width:180px;" oninput="pvSyncToForm()">
+                <input class="form-input" id="pvTgLimit" type="number" min="1" max="200" value="30" style="width:90px;" oninput="pvSyncToForm()" title="每个频道条数">
+                <button class="btn btn-primary btn-sm" type="button" onclick="pvPreviewFromTg()">🔍 TG搜索预览</button>
+            </div>
+            <div class="form-hint" style="margin-top:4px;">勾选后不计分享链接，追更检查改为搜索 TG 频道；正则/重命名模板照常生效</div>
+        </div>
         <!-- 文件名匹配(正则) + 重命名模板（两种模式共用，与表单字段实时同步） -->
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
             <div style="flex:1;min-width:280px;">
@@ -1390,6 +1498,7 @@
                         <tr style="background:var(--bg-deep);">
                             <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;">源文件名</th>
                             <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;width:42%;">重命名后名字（可单独修改）</th>
+                            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;width:80px;">大小</th>
                             <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:center;width:60px;">保留</th>
                         </tr>
                     </thead>
@@ -1438,6 +1547,7 @@ function showToast(msg, type) {
     box.appendChild(t);
     setTimeout(() => { t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(()=>t.remove(),300); }, 2500);
 }
+let _authRedirecting = false;
 async function api(url, opts) {
     opts = opts || {};
     if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
@@ -1445,7 +1555,21 @@ async function api(url, opts) {
         opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
     }
     const r = await fetch(url, opts);
-    if (r.status === 401) { showToast('请重新登录','err'); setTimeout(()=>location.href='/admin/login',1500); }
+    // 并发请求同时 401 时只提示/跳转一次，避免刷屏；并把服务端诊断信息显示出来
+    if (r.status === 401 && !_authRedirecting) {
+        _authRedirecting = true;
+        let detail = '';
+        try {
+            const d = await r.clone().json();
+            if (d && d._diag) {
+                const g = d._diag;
+                detail = ` [build=${g.build} cookie=${g.cookie_present ? 'Y' : 'N'} sid=${g.logged_in} keys=${(g.session_keys || []).join(',') || '空'} host=${g.host}]`;
+                console.error('[auth-401 diag]', g);
+            }
+        } catch (e) {}
+        showToast('登录状态已失效，请重新登录' + detail, 'err');
+        setTimeout(() => location.href = '/admin/login', 1500);
+    }
     return r;
 }
 function openModal(id) { document.getElementById(id).classList.add('active'); }
@@ -1455,7 +1579,7 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 });
 
 // ═══════════════ 侧边栏导航 ═══════════════
-const sectionTitles = { 'profile': '个人资料', 'storage': '存储配置', 'strm': 'STRM 任务', 'regex': '匹配规则', 'chase': '追更', 'cloud': '云盘配置', 'clients': '客户端管理', 'notify': '通知设置' };
+const sectionTitles = { 'profile': '个人资料', 'storage': '存储配置', 'strm': 'STRM 任务', 'regex': '匹配规则', 'chase': '追更', 'cloud': '云盘配置', 'clients': '客户端管理', 'notify': '通知设置', 'telegram': 'Telegram 资源' };
 function switchSection(section) {
     document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
     document.getElementById('section-'+section).classList.add('active');
@@ -1470,6 +1594,7 @@ function switchSection(section) {
     if (section === 'clients') loadClients();
     if (section === 'profile') loadTunnelConfig();
     if (section === 'notify') loadNotifyConfig();
+    if (section === 'telegram') loadTgOverview();
     startSectionPoll(section);
 }
 
@@ -1753,7 +1878,7 @@ function renderStorageCards() {
                 <button class="btn-icon danger" onclick="deleteStorageCard('${sid}')" title="删除"><i class="fa-solid fa-trash"></i></button>
             </div>
             <div class="uc-cookie" id="stCookie-${sid}">
-                <textarea id="stCookieTa-${sid}" placeholder="从 WPS 网页版 (drive.kdocs.cn) F12 → Network → 请求头中复制完整 Cookie">${escHtml(s.cookie||'')}</textarea>
+                <textarea id="stCookieTa-${sid}" placeholder="从 WPS 网页版（www.kdocs.cn 或 365.kdocs.cn）F12 → Network → 搜索 islogin → 请求头中复制完整 Cookie">${escHtml(s.cookie||'')}</textarea>
                 <div class="btn-row">
                     <button class="btn btn-sm btn-primary" onclick="saveStorageCookie('${sid}','${i}')"><i class="fa-solid fa-floppy-disk"></i> 保存 Cookie</button>
                 </div>
@@ -2359,7 +2484,7 @@ function onCloudTypeChange() {
     const ta = document.getElementById('modalAccCookie');
     const hint = document.getElementById('cloudTypeHint');
     const hints = {
-        wps:    {label:'Cookie', ph:'粘贴 WPS 账号的完整 Cookie 字符串', h:'从 drive.kdocs.cn 登录后 F12 → Network → 复制 Cookie'},
+        wps:    {label:'Cookie', ph:'粘贴 WPS 账号的完整 Cookie 字符串', h:'登录 www.kdocs.cn 或 365.kdocs.cn 后 F12 → Network → 搜索 islogin → 复制请求头里的 Cookie'},
         tianyi: {label:'Cookie', ph:'粘贴 cloud.189.cn 的完整 Cookie 字符串', h:'从 cloud.189.cn 登录后 F12 → Application → Cookies → 复制全部'},
         yidong: {label:'令牌',   ph:'粘贴 139 云盘的 Authorization 令牌', h:'从 yun.139.com 登录后 F12 → Network → 请求头中复制 Authorization (Basic xxx)'},
     };
@@ -3213,6 +3338,10 @@ function showChaseDialog(editId) {
             document.getElementById('chaseRenameTemplate').value = t.rename_template||'';
             document.getElementById('chaseSubPath').value = t.sub_path||'';
             document.getElementById('chaseTmdbId').value = t.tmdb_id||'';
+            document.getElementById('chaseTgSearch').value = t.tg_search ? '1' : '';
+            document.getElementById('chaseTgQuery').value = t.tg_query||'';
+            document.getElementById('chaseTgChannels').value = Array.isArray(t.tg_channels) ? t.tg_channels.join(',') : (t.tg_channels||'');
+            document.getElementById('chaseTgLimit').value = t.tg_limit||30;
             // 延迟设置客户端选择，等待列表加载
             setTimeout(() => {
                 document.getElementById('chaseTargetClient').value = t.target_client||'';
@@ -3229,6 +3358,9 @@ function showChaseDialog(editId) {
                 episodes_filter: t.episodes_filter||'', ep_pattern: t.ep_pattern||'',
                 rename_template: t.rename_template||'', tmdb_id: t.tmdb_id||'',
                 target_client: t.target_client||'', sub_path: t.sub_path||'',
+                tg_search: !!t.tg_search, tg_query: t.tg_query||'',
+                tg_channels: Array.isArray(t.tg_channels) ? t.tg_channels : [],
+                tg_limit: t.tg_limit||30,
                 schedule: t.schedule||'DAILY:01:00', enabled: !!t.enabled
             };
         }
@@ -3246,6 +3378,10 @@ function showChaseDialog(editId) {
         document.getElementById('chaseRenameTemplate').value = '';
         document.getElementById('chaseSubPath').value = '';
         document.getElementById('chaseTmdbId').value = '';
+        document.getElementById('chaseTgSearch').value = '';
+        document.getElementById('chaseTgQuery').value = '';
+        document.getElementById('chaseTgChannels').value = '';
+        document.getElementById('chaseTgLimit').value = '30';
         // 新建时默认每天凌晨1点
         setChaseScheduleFromSaved('DAILY:01:00');
     }
@@ -3919,8 +4055,12 @@ function buildChaseBody() {
     const targetClient = document.getElementById('chaseTargetClient').value.trim();
     const subPath = document.getElementById('chaseSubPath').value.trim();
     const tmdbId = document.getElementById('chaseTmdbId').value.trim();
+    const tgSearch = document.getElementById('chaseTgSearch').value === '1';
+    const tgQuery = document.getElementById('chaseTgQuery').value.trim();
+    const tgChannelsRaw = document.getElementById('chaseTgChannels').value.trim();
+    const tgLimit = parseInt(document.getElementById('chaseTgLimit').value) || 30;
     if (!name) throw new Error('请输入片名');
-    if (!shareUrl) throw new Error('请输入分享链接');
+    if (!tgSearch && !shareUrl) throw new Error('请输入分享链接（或勾选 TG搜索）');
     // 将模板中的 {name} 替换为 fullName（含年份）
     renameTemplate = renameTemplate.replace(/\{name\}/g, fullName);
     return {
@@ -3936,6 +4076,10 @@ function buildChaseBody() {
         tmdb_id: tmdbId,
         target_client: targetClient,
         sub_path: subPath,
+        tg_search: tgSearch,
+        tg_query: tgQuery,
+        tg_channels: tgChannelsRaw ? tgChannelsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [],
+        tg_limit: tgLimit,
         schedule: getChaseScheduleValue(),
         enabled: true
     };
@@ -4051,12 +4195,12 @@ async function runChaseTask(id) {
 async function runAllChaseTasks() {
     const btn = document.getElementById('btnChaseRunAll');
     try {
-        const enabled = (chaseData || []).filter(t => t.enabled !== false && !t.active && !t.stopped);
+        const enabled = (chaseData || []).filter(t => t.enabled !== false && !t.active);
         if (!enabled.length) {
-            showToast('暂无可运行的追更任务（全部已停止或进行中）', 'warn');
+            showToast('暂无可运行的追更任务（全部停用或进行中）', 'warn');
             return;
         }
-        if (!confirm(`确认一键运行 ${enabled.length} 个追更任务？\n（已停止 / 已有任务进行中的会自动跳过）`)) return;
+        if (!confirm(`确认一键运行 ${enabled.length} 个追更任务？\n（已停止的会自动恢复运行 / 已有任务进行中的会自动跳过）`)) return;
         btn.disabled = true;
         const r = await api('/api/admin/chase/run_all', {method:'POST'});
         const d = await r.json();
@@ -4243,6 +4387,12 @@ function openPreviewModal() {
     document.getElementById('pvSubPath').value = document.getElementById('chaseSubPath').value.trim();
     document.getElementById('pvEpPattern').value = document.getElementById('chaseEpPattern').value.trim();
     document.getElementById('pvRenameTemplate').value = document.getElementById('chaseRenameTemplate').value.trim();
+    // TG 搜索源回填
+    document.getElementById('pvTgSearch').checked = (document.getElementById('chaseTgSearch').value === '1');
+    document.getElementById('pvTgQuery').value = document.getElementById('chaseTgQuery').value.trim();
+    document.getElementById('pvTgChannels').value = document.getElementById('chaseTgChannels').value.trim();
+    document.getElementById('pvTgLimit').value = document.getElementById('chaseTgLimit').value || '30';
+    pvToggleTgSearch();
     // 手动模式预填样例文件名（以当前片名为例）
     const name = document.getElementById('chaseName').value.trim();
     const year = document.getElementById('chaseYear').value.trim();
@@ -4277,6 +4427,8 @@ function pvShowLoading(text) {
 }
 
 function pvSwitchTab(tab) {
+    // TG 搜索模式下不显示分享/手动输入切换
+    if (document.getElementById('pvTgSearch').checked) return;
     const isManual = (tab === 'manual');
     document.getElementById('pvTabShare').style.display = isManual ? 'none' : 'block';
     document.getElementById('pvTabManual').style.display = isManual ? 'block' : 'none';
@@ -4298,7 +4450,7 @@ async function pvLoadCached() {
             const p = d.cache.params || {};
             _pvBaseEp = parseInt(p.base_ep) || 0;
             _pvSnapshot = null;   // 恢复的是历史快照，不覆盖当前会话新预览
-            _pvSourceFiles = (d.cache.matched || []).map(m => ({name: m.filename, size: m.size || 0}));
+            _pvSourceFiles = (d.cache.matched || []).map(m => ({name: m.filename, size: m.size || 0, display: m.display || ''}));
             pvRenderResult(d.cache.matched, _pvBaseEp);
             document.getElementById('pvCount').textContent = '📦 上次预览 ' + (d.cache.ts || '') + ' · 共 ' + (d.cache.total || d.cache.matched.length) + ' 个文件';
             document.getElementById('pvSaveHint').textContent = '如需最新文件列表，请点「🔗 从分享链接预览」刷新';
@@ -4334,6 +4486,22 @@ function pvSyncToForm() {
     document.getElementById('chaseSubPath').value = document.getElementById('pvSubPath').value.trim();
     document.getElementById('chaseEpPattern').value = document.getElementById('pvEpPattern').value.trim();
     document.getElementById('chaseRenameTemplate').value = document.getElementById('pvRenameTemplate').value.trim();
+    document.getElementById('chaseTgSearch').value = document.getElementById('pvTgSearch').checked ? '1' : '';
+    document.getElementById('chaseTgQuery').value = document.getElementById('pvTgQuery').value.trim();
+    document.getElementById('chaseTgChannels').value = document.getElementById('pvTgChannels').value.trim();
+    document.getElementById('chaseTgLimit').value = document.getElementById('pvTgLimit').value || '30';
+}
+
+// TG 搜索勾选状态：隐藏分享链接相关 UI（TG 源不需要分享链接）
+function pvToggleTgSearch() {
+    const on = document.getElementById('pvTgSearch').checked;
+    document.getElementById('pvTgFields').style.display = on ? 'flex' : 'none';
+    // TG 源不需要分享链接/子文件夹/手动输入：整块隐藏
+    document.getElementById('pvTabShareBtn').style.display = on ? 'none' : '';
+    document.getElementById('pvTabManualBtn').style.display = on ? 'none' : '';
+    document.getElementById('pvTabShare').style.display = on ? 'none' : 'block';
+    document.getElementById('pvTabManual').style.display = 'none';
+    if (on) pvResetResult();
 }
 
 function pvQuickPattern() {
@@ -4426,6 +4594,74 @@ async function pvPreviewFromShare() {
     }
 }
 
+// 从 Telegram 搜索预览（TG 追更源：搜索频道文件 → 按正则/模板匹配）
+async function pvPreviewFromTg() {
+    const q = document.getElementById('pvTgQuery').value.trim() ||
+              document.getElementById('chaseName').value.trim();
+    const chRaw = document.getElementById('pvTgChannels').value.trim();
+    const channels = chRaw ? chRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
+    const limit = parseInt(document.getElementById('pvTgLimit').value) || 30;
+    const epPattern = document.getElementById('pvEpPattern').value.trim();
+    const renameTemplate = document.getElementById('pvRenameTemplate').value.trim();
+    const chaseName = document.getElementById('chaseName').value.trim();
+    const season = parseInt(document.getElementById('chaseSeason').value) || 0;
+    const baseEp = parseInt(document.getElementById('chaseBaseEp').value) || 0;
+    const subPath = document.getElementById('pvSubPath').value.trim();
+    const tmdbId = document.getElementById('chaseTmdbId').value.trim();
+    const category = document.getElementById('chaseCategory').value.trim();
+    if (!q) { showToast('请填写搜索关键词（或先填片名）', 'warn'); return; }
+
+    pvShowLoading('正在搜索 Telegram 频道...');
+    try {
+        const r1 = await api('/api/admin/telegram/search', {
+            method: 'POST', body: {query: q, channels: channels, limit: limit}
+        });
+        const d1 = await r1.json();
+        if (!d1.success) { pvResetResult(); showToast(d1.message || 'TG 搜索失败', 'warn'); return; }
+        const items = d1.items || [];
+        if (!items.length) {
+            pvResetResult();
+            document.getElementById('pvCount').textContent = 'TG 搜索无结果' +
+                ((d1.errors || []).length ? '：' + d1.errors.join('；') : '');
+            return;
+        }
+        const r2 = await api('/api/admin/chase/preview_files', {
+            method: 'POST',
+            body: {
+                file_names: items.map(x => x.name),
+                file_sizes: items.map(x => x.size || 0),
+                display_names: items.map(x => {
+                    const c = String(x.caption || '').split('\n')[0].trim();
+                    return c || x.name;
+                }),
+                ep_pattern: epPattern, rename_template: renameTemplate,
+                chase_name: chaseName, season: season, base_ep: baseEp,
+                sub_path: subPath, tmdb_id: tmdbId, category: category,
+                chase_id: _pvChaseId
+            }
+        });
+        const d2 = await r2.json();
+        if (!d2.success) { pvResetResult(); showToast(d2.message || '匹配失败', 'warn'); return; }
+        _pvBaseEp = baseEp;
+        _pvSourceFiles = items.map(x => {
+            const c = String(x.caption || '').split('\n')[0].trim();
+            return {name: x.name, size: x.size || 0, display: c || x.name};
+        });
+        _pvSnapshot = { tg_search: true, share_url: '', sub_path: subPath,
+                        ep_pattern: epPattern, rename_template: renameTemplate,
+                        season: season, base_ep: baseEp,
+                        matched: d2.matched || [], total: d2.total || 0,
+                        matched_count: d2.matched_count || 0, ts: Date.now() };
+        pvRenderResult(d2.matched || [], baseEp);
+        document.getElementById('pvCount').textContent = 'TG 搜索 ' + items.length +
+            ' 个文件，匹配 ' + (d2.matched_count || 0) + ' 条';
+        document.getElementById('pvSaveHint').textContent = 'TG 源：保存后按当前关键词/频道检查更新';
+    } catch(e) {
+        pvResetResult();
+        showToast('TG 预览失败: ' + e.message, 'warn');
+    }
+}
+
 // 用当前已有文件列表重新生成预览（改模板/正则后立即生效，无需重新拉分享链接）
 async function pvRepreview(notify) {
     if (!_pvSourceFiles || !_pvSourceFiles.length) {
@@ -4446,10 +4682,11 @@ async function pvRepreview(notify) {
     try {
         const pvNames = _pvSourceFiles.map(f => f.name);
         const pvSizes = _pvSourceFiles.map(f => f.size || 0);
+        const pvDisplays = _pvSourceFiles.map(f => f.display || '');
         const r = await fetch('/api/admin/chase/preview_files', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file_names: pvNames, file_sizes: pvSizes, ep_pattern: epPattern, rename_template: renameTemplate, chase_name: chaseName, season: season, base_ep: baseEp, sub_path: subPath, tmdb_id: tmdbId, category: category, chase_id: _pvChaseId })
+            body: JSON.stringify({ file_names: pvNames, file_sizes: pvSizes, display_names: pvDisplays, ep_pattern: epPattern, rename_template: renameTemplate, chase_name: chaseName, season: season, base_ep: baseEp, sub_path: subPath, tmdb_id: tmdbId, category: category, chase_id: _pvChaseId })
         });
         const d = await r.json();
         if (!d.success) { pvCountEl.textContent = prevText; showToast(d.message || '重新生成失败', 'warn'); return; }
@@ -4512,12 +4749,25 @@ function pvRenderResult(matched, baseEp) {
     const wrap = document.getElementById('pvResultWrap');
     wrap.style.display = 'flex';
     if (!matched || !matched.length) {
-        tbody.innerHTML = '<tr><td colspan="3" style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">未匹配到文件</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">未匹配到文件</td></tr>';
         document.getElementById('pvCount').textContent = '共 0 个文件';
         return;
     }
     // 分类以追更表单为准：历史快照里 is_movie 曾被硬编码为 True，不可信
     const isMovieTask = ((document.getElementById('chaseCategory') || {}).value || '').includes('电影');
+    const _formSeason = parseInt((document.getElementById('chaseSeason') || {}).value) || 0;
+    // 同一集只保留体积最大的一条（重复投稿/多频道同集），避免重复勾选下载
+    if (!isMovieTask) {
+        const _seen = {};
+        const _dedup = [];
+        matched.forEach(m => {
+            if (m.ep_num === null || m.ep_num === undefined) { _dedup.push(m); return; }
+            const _k = _formSeason > 0 ? ('E' + m.ep_num) : ((m.season || 0) + '-' + m.ep_num);
+            if (_seen[_k] === undefined) { _seen[_k] = _dedup.length; _dedup.push(m); }
+            else if ((m.size || 0) > (_dedup[_seen[_k]].size || 0)) { _dedup[_seen[_k]] = m; }
+        });
+        matched = _dedup;
+    }
     // 未匹配文件（正则匹配失败的剧集文件）置顶显示，方便确认哪些不会参与下载；
     // 用稳定分区保持已匹配文件的原有顺序
     const rows = matched.filter(m => (m.ep_num === null || m.ep_num === undefined) && !isMovieTask)
@@ -4525,6 +4775,7 @@ function pvRenderResult(matched, baseEp) {
     let html = '';
     rows.forEach(m => {
         const fname = m.filename;
+        const fnameDisp = m.display || fname;
         const epNum = m.ep_num;
         // 已追旧集：非电影模式且集数 <= base_ep
         const isOld = !m.is_movie && epNum !== null && epNum !== undefined && baseEp > 0 && epNum <= baseEp;
@@ -4535,8 +4786,8 @@ function pvRenderResult(matched, baseEp) {
         // 未匹配文件默认不勾选「保留」（即跳过）：与客户端行为一致，正则匹配失败的文件不参与下载；用户仍可手动勾选
         const keep = !m.skip && !unmatched;
         if (m.manual_ep !== undefined && m.manual_ep !== null) _pvManualEps[fname] = m.manual_ep;
-        const seTag = (epNum !== null && epNum !== undefined && m.season > 0)
-            ? '<span style="background:rgba(16,185,129,.14);border:1px solid rgba(16,185,129,.35);border-radius:4px;padding:0 5px;font-size:11px;color:#34d399;margin-left:6px;">S' + String(m.season).padStart(2, '0') + 'E' + String(epNum).padStart(2, '0') + '</span>'
+        const seTag = (epNum !== null && epNum !== undefined && (_formSeason > 0 || m.season > 0))
+            ? '<span style="background:rgba(16,185,129,.14);border:1px solid rgba(16,185,129,.35);border-radius:4px;padding:0 5px;font-size:11px;color:#34d399;margin-left:6px;">S' + String(_formSeason > 0 ? _formSeason : m.season).padStart(2, '0') + 'E' + String(epNum).padStart(2, '0') + '</span>'
             : '';
         const epTag = (epNum !== null && epNum !== undefined)
             ? '<span style="background:var(--bg-deep);border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:11px;color:var(--blue);margin-left:6px;">EP' + String(epNum).padStart(2, '0') + '</span>'
@@ -4544,9 +4795,14 @@ function pvRenderResult(matched, baseEp) {
         const oldTag = isOld ? '<span style="background:rgba(148,163,184,.12);border-radius:4px;padding:0 5px;font-size:11px;color:var(--muted);margin-left:6px;">已追</span>' : '';
         const unmatchedTag = unmatched ? '<span style="background:rgba(148,163,184,.12);border-radius:4px;padding:0 5px;font-size:11px;color:var(--muted);margin-left:6px;">未匹配</span>' : '';
         const ro = isOld ? ' disabled title="已追文件不参与下载，不可修改"' : '';
+        const _sz = m.size || 0;
+        const sizeTxt = _sz >= 1073741824 ? (_sz / 1073741824).toFixed(2) + ' GB'
+                      : (_sz >= 1048576 ? (_sz / 1048576).toFixed(1) + ' MB'
+                      : (_sz > 0 ? (_sz / 1024).toFixed(0) + ' KB' : '-'));
         html += '<tr>' +
-            '<td style="padding:5px 8px;border-bottom:1px solid var(--bg-deep);font-size:12px;word-break:break-all;' + ((isOld || unmatched) ? 'color:var(--muted);' : '') + '">' + escHtml(fname) + seTag + epTag + oldTag + unmatchedTag + '</td>' +
+            '<td style="padding:5px 8px;border-bottom:1px solid var(--bg-deep);font-size:12px;word-break:break-all;' + ((isOld || unmatched) ? 'color:var(--muted);' : '') + '" title="' + escAttr(fname) + '">' + escHtml(fnameDisp) + seTag + epTag + oldTag + unmatchedTag + '</td>' +
             '<td style="padding:5px 8px;border-bottom:1px solid var(--bg-deep);"><input class="form-input mono pv-rename-input" data-fname="' + escAttr(fname) + '" value="' + escAttr(renamedVal) + '" style="font-size:12px;padding:4px 6px;"' + ro + '></td>' +
+            '<td style="padding:5px 8px;border-bottom:1px solid var(--bg-deep);font-size:12px;color:var(--muted);white-space:nowrap;">' + sizeTxt + '</td>' +
             '<td style="padding:5px 8px;border-bottom:1px solid var(--bg-deep);text-align:center;"><input type="checkbox" class="pv-skip-check" data-fname="' + escAttr(fname) + '"' + (keep ? ' checked' : '') + (isOld ? ' disabled' : '') + '></td>' +
             '</tr>';
     });
@@ -5159,6 +5415,268 @@ function removeClient(clientName) {
         showToast('已移出'); loadClients();
     }).catch(()=>showToast('网络错误','err'));
 }
+
+// ═══════════════ Telegram 资源 ═══════════════
+let _tgChannels = [];
+
+async function loadTgOverview() {
+    try {
+        const r = await api('/api/admin/telegram/overview');
+        const d = await r.json();
+        if (!d || d.success === false) { showToast((d && d.message) || '加载失败', 'err'); return; }
+        document.getElementById('tgApiId').value = d.api_id || '';
+        document.getElementById('tgApiHash').value = d.api_hash || '';
+        document.getElementById('tgProxy').value = d.proxy || '';
+        document.getElementById('tgClientSessState').textContent = d.client_session_set ? '已配置' : '未配置';
+        _tgChannels = d.channels || [];
+        renderTgChannels();
+        tgRefreshStatus();
+    } catch (e) { showToast('加载 Telegram 配置失败', 'err'); }
+}
+
+function tgSetState(text, color) {
+    const el = document.getElementById('tgLoginState');
+    el.textContent = text;
+    el.style.color = color || 'var(--text2)';
+}
+
+function tgShowAccount(u, valid, err) {
+    const box = document.getElementById('tgAccountInfo');
+    if (!box) return;
+    if (!u) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    document.getElementById('tgAccName').textContent = u.name || '-';
+    document.getElementById('tgAccId').textContent = u.id || '-';
+    document.getElementById('tgAccUsername').textContent = u.username ? ('@' + u.username) : '无';
+    document.getElementById('tgAccPhone').textContent = u.phone ? ('+' + u.phone) : '-';
+    const v = document.getElementById('tgAccValid');
+    v.textContent = valid ? '● 会话有效' : ('● 会话失效' + (err ? '：' + err : ''));
+    v.style.color = valid ? 'var(--green)' : 'var(--red)';
+}
+
+async function tgRefreshStatus(attempt) {
+    attempt = attempt || 0;
+    if (!attempt) tgSetState('检测中...', 'var(--text2)');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    try {
+        const r = await fetch('/api/admin/telegram/status', {signal: ctrl.signal});
+        clearTimeout(timer);
+        const d = await r.json();
+        document.getElementById('tgClientSessState').textContent = d.client_session_set ? '已配置' : '未配置';
+        if (d.pending) {
+            if (attempt < 8) { setTimeout(() => tgRefreshStatus(attempt + 1), 2000); return; }
+            tgSetState('仍在外网连接中，可稍后重试', 'var(--orange)');
+            return;
+        }
+        if (d.authorized && d.user) {
+            tgSetState('已登录：' + (d.user.name || d.user.id) + (d.user.username ? ' (@' + d.user.username + ')' : ''), 'var(--green)');
+            tgShowAccount(d.user, true);
+        } else if (d.expired) {
+            tgSetState('会话已失效，请重新扫码登录', 'var(--red)');
+            tgShowAccount(null, false);
+        } else if (d.error) {
+            tgSetState('未登录：' + d.error, 'var(--orange)');
+            tgShowAccount(null, false);
+        } else {
+            tgSetState('未登录', 'var(--orange)');
+            tgShowAccount(null, false);
+        }
+    } catch (e) {
+        clearTimeout(timer);
+        tgSetState('检测超时，请检查服务器网络或代理', 'var(--red)');
+    }
+}
+
+async function saveTgConfig() {
+    const body = {
+        api_id: document.getElementById('tgApiId').value.trim(),
+        api_hash: document.getElementById('tgApiHash').value.trim(),
+        proxy: document.getElementById('tgProxy').value.trim(),
+    };
+    try {
+        const r = await api('/api/admin/telegram/config', {method: 'POST', body: body});
+        const d = await r.json();
+        showToast(d.message || (d.success ? '已保存' : '保存失败'), d.success ? 'ok' : 'err');
+    } catch (e) { showToast('网络错误', 'err'); }
+}
+
+async function tgSendCode() {
+    const phone = document.getElementById('tgPhone').value.trim();
+    if (!phone) { showToast('请先填写手机号', 'err'); return; }
+    showToast('正在发送验证码...');
+    try {
+        const r = await api('/api/admin/telegram/send_code', {method: 'POST', body: {phone: phone}});
+        const d = await r.json();
+        showToast(d.message || '已发送', d.success ? 'ok' : 'err');
+    } catch (e) { showToast('发送失败：网络错误', 'err'); }
+}
+
+async function tgSignIn() {
+    const body = {
+        phone: document.getElementById('tgPhone').value.trim(),
+        code: document.getElementById('tgCode').value.trim(),
+        password: document.getElementById('tgPassword').value,
+    };
+    if (!body.code) { showToast('请输入验证码', 'err'); return; }
+    try {
+        const r = await api('/api/admin/telegram/sign_in', {method: 'POST', body: body});
+        const d = await r.json();
+        showToast(d.message || (d.success ? '登录成功' : '登录失败'), d.success ? 'ok' : 'err');
+        if (d.success) { document.getElementById('tgCode').value = ''; tgRefreshStatus(); }
+    } catch (e) { showToast('登录失败：网络错误', 'err'); }
+}
+
+let _tgQrTimer = null;
+let _tgQrSvg = '';
+let _tgQrMode = 'main';
+function _tgQrStop() { if (_tgQrTimer) { clearInterval(_tgQrTimer); _tgQrTimer = null; } }
+
+async function tgQrStart() { return _tgQrBegin('main'); }
+async function tgQrStartClient() { return _tgQrBegin('client'); }
+
+async function _tgQrBegin(target) {
+    _tgQrMode = target;
+    try {
+        const r = await api('/api/admin/telegram/qr_start', {method: 'POST', body: {target: target}});
+        const d = await r.json();
+        if (!d.success) { showToast(d.message || '生成失败', 'err'); return; }
+        document.getElementById('tgQrBox').style.display = 'block';
+        document.getElementById('tgQrPwd').style.display = 'none';
+        _tgQrSvg = d.svg || '';
+        document.getElementById('tgQrImg').innerHTML = _tgQrSvg;
+        document.getElementById('tgQrTip').textContent = (target === 'client')
+            ? '请用手机 Telegram 扫描并确认，添加客户端下载会话…'
+            : '请用手机 Telegram 扫描二维码并确认…';
+        _tgQrStop();
+        _tgQrTimer = setInterval(tgQrPoll, 2000);
+    } catch (e) { showToast('生成失败：网络错误', 'err'); }
+}
+
+async function tgQrPoll() {
+    try {
+        const r = await api('/api/admin/telegram/qr_status');
+        const d = await r.json();
+        if (!d.success) return;
+        if (d.state === 'success') {
+            _tgQrStop();
+            document.getElementById('tgQrBox').style.display = 'none';
+            document.getElementById('tgQrImg').innerHTML = '';
+            showToast(_tgQrMode === 'client' ? '客户端下载会话已添加' : 'Telegram 扫码登录成功', 'ok');
+            tgRefreshStatus();
+            return;
+        }
+        if (d.state === 'password_needed') {
+            _tgQrStop();
+            document.getElementById('tgQrImg').innerHTML = '';
+            document.getElementById('tgQrTip').textContent = '该账号开启了两步验证，请输入密码';
+            document.getElementById('tgQrPwd').style.display = 'block';
+            return;
+        }
+        if (d.state === 'expired' || d.state === 'idle' || d.state === 'error') {
+            _tgQrStop();
+            document.getElementById('tgQrImg').innerHTML = '';
+            document.getElementById('tgQrTip').textContent = '二维码已失效，请重新生成';
+            return;
+        }
+        if (d.svg && d.svg !== _tgQrSvg) {
+            _tgQrSvg = d.svg;
+            document.getElementById('tgQrImg').innerHTML = d.svg;
+        }
+        document.getElementById('tgQrTip').textContent = d.left
+            ? ('请用手机 Telegram 扫描并确认（二维码 ' + d.left + ' 秒后自动刷新，请扫最新那张）')
+            : '请用手机 Telegram 扫描并确认…';
+    } catch (e) {}
+}
+
+async function tgQrSubmitPwd() {
+    const pwd = document.getElementById('tgQrPassword').value;
+    if (!pwd) { showToast('请输入两步验证密码', 'err'); return; }
+    try {
+        const r = await api('/api/admin/telegram/qr_password', {method: 'POST', body: {password: pwd}});
+        const d = await r.json();
+        if (d.success) {
+            document.getElementById('tgQrBox').style.display = 'none';
+            document.getElementById('tgQrPassword').value = '';
+            showToast('登录成功', 'ok');
+            tgRefreshStatus();
+        } else { showToast(d.message || '密码错误', 'err'); }
+    } catch (e) { showToast('提交失败：网络错误', 'err'); }
+}
+
+async function tgQrCancel() {
+    _tgQrStop();
+    document.getElementById('tgQrBox').style.display = 'none';
+    document.getElementById('tgQrPwd').style.display = 'none';
+    try { await api('/api/admin/telegram/qr_cancel', {method: 'POST', body: {}}); } catch (e) {}
+}
+
+async function tgLogout() {
+    if (!confirm('确定退出登录并清除服务端会话？')) return;
+    try {
+        const r = await api('/api/admin/telegram/logout', {method: 'POST', body: {}});
+        const d = await r.json();
+        showToast(d.message || '已退出', d.success ? 'ok' : 'err');
+        tgRefreshStatus();
+    } catch (e) { showToast('网络错误', 'err'); }
+}
+
+function renderTgChannels() {
+    const box = document.getElementById('tgChannelList');
+    document.getElementById('tgChannelCount').textContent = _tgChannels.length + ' 个';
+    if (!_tgChannels.length) {
+        box.innerHTML = '<div class="empty-hint">还没有频道，添加后即可搜索</div>';
+        return;
+    }
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+    html += '<thead><tr style="color:var(--muted);">';
+    html += '<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);">频道名称</th>';
+    html += '<th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);">标识</th>';
+    html += '<th style="text-align:right;padding:6px;border-bottom:1px solid var(--border);width:70px;">操作</th></tr></thead><tbody>';
+    _tgChannels.forEach((c, i) => {
+        html += '<tr>';
+        html += '<td style="padding:6px;border-bottom:1px solid var(--border);">' + escHtml(c.title || '--') + '</td>';
+        html += '<td style="padding:6px;border-bottom:1px solid var(--border);color:var(--text2);word-break:break-all;">' + escHtml(c.value || '') + '</td>';
+        html += '<td style="padding:6px;border-bottom:1px solid var(--border);text-align:right;">';
+        html += '<button class="btn btn-danger btn-xs" onclick="removeTgChannel(' + i + ')" title="移除频道"><i class="fa-solid fa-trash"></i></button>';
+        html += '</td></tr>';
+    });
+    html += '</tbody></table>';
+    box.innerHTML = html;
+}
+
+async function addTgChannel() {
+    const input = document.getElementById('tgChannelInput');
+    const value = input.value.trim();
+    if (!value) { showToast('请输入频道标识', 'err'); return; }
+    try {
+        const r = await api('/api/admin/telegram/channels/add', {method: 'POST', body: {channel: value}});
+        const d = await r.json();
+        if (!d.success) { showToast(d.message || '添加失败', 'err'); return; }
+        input.value = '';
+        showToast(d.message || '已添加');
+        const ch = d.channel || {value: value, title: value};
+        _tgChannels = _tgChannels.filter(c => c.value !== ch.value);
+        _tgChannels.push(ch);
+        renderTgChannels();
+    } catch (e) { showToast('添加失败：网络错误', 'err'); }
+}
+
+async function removeTgChannel(idx) {
+    const ch = _tgChannels[idx];
+    if (!ch) return;
+    if (!confirm('确定移除频道「' + (ch.title || ch.value) + '」？')) return;
+    try {
+        const r = await api('/api/admin/telegram/channels/remove', {method: 'POST', body: {value: ch.value}});
+        const d = await r.json();
+        if (d.success) {
+            _tgChannels.splice(idx, 1);
+            renderTgChannels();
+            showToast('已移除');
+        } else showToast(d.message || '移除失败', 'err');
+    } catch (e) { showToast('网络错误', 'err'); }
+}
+
 </script>
 </body>
 </html>

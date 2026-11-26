@@ -17,7 +17,7 @@ source.include_exts = py,png,jpg,kv,atlas,ttf,otf,json
 
 # (list) List of inclusions using pattern matching
 # tools/* 为 7-Zip 官方 Linux arm64 完全静态二进制 7zz（26.02），用于手机端解压 7z/rar/zip
-source.include_patterns = yidong_core.py,quark_core.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,fonts/*,tools/*
+source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,tg_downloader.py,fonts/*,tools/*
 
 # (list) Source files to exclude (let empty to not exclude anything)
 source.exclude_exts = pyc,pyo
@@ -45,7 +45,7 @@ version = 1.0.1
 # 4) 不用 pycryptodome！其 C 扩展（_raw_ecb.so 等）在 p4a 交叉编译后，Android 运行时
 #    ctypes 加载报 "undefined symbol: PyObject_GetBuffer" 直接崩溃（两次实测确认）。
 #    改用纯 Python 的 pyaes 实现 AES-CBC（见 yidong_core.py，含 PKCS7 pad/unpad 等价实现）。
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,android
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,telethon,android
 
 # (str) Custom source folders for requirements
 #p4a.source_dir =

@@ -193,6 +193,11 @@ class SettingsPage(BoxLayout):
         self.wps_input = self._row('WPS Cookie', cfg.get('wps_cookie', ''), multiline=True)
         self.parent_input = self._row('WPS 目标目录ID', cfg.get('wps_parent_id', '0'))
 
+        self._sep('Telegram 直连下载（可空）')
+        self.tg_id_input = self._row('TG api_id', cfg.get('tg_api_id', ''))
+        self.tg_hash_input = self._row('TG api_hash', cfg.get('tg_api_hash', ''))
+        self.tg_sess_input = self._row('TG session', cfg.get('tg_session', ''), multiline=True)
+
         self._sep('下载存储')
         self.dir_input = self._row('下载临时目录(可空)', cfg.get('save_dir', ''))
         dir_tip = Label(text='可空：默认存应用私有目录，上传后自动清理。自定义如 /sdcard/Download '
@@ -265,6 +270,9 @@ class SettingsPage(BoxLayout):
             'wps_cookie': self.wps_input.text.strip(),
             'wps_parent_id': self.parent_input.text.strip() or '0',
             'save_dir': self.dir_input.text.strip(),
+            'tg_api_id': self.tg_id_input.text.strip(),
+            'tg_api_hash': self.tg_hash_input.text.strip(),
+            'tg_session': self.tg_sess_input.text.strip(),
         })
         save_config(cfg)
         self.app.notify('配置已保存')

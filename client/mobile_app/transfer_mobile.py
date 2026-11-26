@@ -394,6 +394,13 @@ class TransferEngine:
 
         if progress_cb:
             progress_cb(downloaded, file_size, "下载完成")
+        # 下载完成后删除网盘里的临时转存文件
+        try:
+            _cleanup = getattr(self.src, "cleanup", None)
+            if _cleanup:
+                _cleanup(share_url, file_name=file_name)
+        except Exception:
+            pass
         return local_path, None
 
     def upload_file(self, local_path, file_name, progress_cb=None, cancel_check=None):

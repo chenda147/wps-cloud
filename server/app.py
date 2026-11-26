@@ -7,9 +7,12 @@ server/app.py - 应用入口（壳）
 """
 import os
 import sys
+import hashlib
+import secrets
 import threading
+from datetime import timedelta
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request, session
 
 # ─── 兼容两种启动方式 ───
 # 既支持 `python -m server`（包模式，相对导入可用），
@@ -70,9 +73,84 @@ _logging.getLogger().setLevel(_logging.DEBUG)
 def get_log_buffer():
     return _LOG_BUFFER
 
+def _machine_id():
+    """取一个跨进程/跨重启都稳定的机器标识，用于密钥落盘失败时派生密钥。"""
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or ""
+
+
+def _load_or_create_secret_key():
+    """持久化 session 密钥，避免每次重启后所有登录态失效。
+
+    优先级：环境变量 SECRET_KEY > DATA_DIR/secret.key > 稳定派生密钥。
+    """
+    env_key = (os.environ.get("SECRET_KEY") or "").strip()
+    if env_key:
+        return env_key
+    path = os.path.join(DATA_DIR, "secret.key")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+            if key:
+                return key
+    except Exception as e:
+        print(f"[session] 读取 {path} 失败: {e}", flush=True)
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(key)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        return key
+    except Exception as e:
+        # 落盘失败时退化为稳定派生密钥：宁可安全性略降，也不能让用户反复掉登录
+        print(f"[session] 写入 {path} 失败({e})，改用派生密钥", flush=True)
+        seed = "|".join([os.path.abspath(path), _machine_id()])
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
 app = Flask(__name__)
-app.secret_key = __import__("secrets").token_hex(32)
+app.secret_key = _load_or_create_secret_key()
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB 上传限制
+# ⚠ 关键：Flask 默认 cookie 名是 "session"，与 NAS 上其它应用（同一域名、不同端口）
+# 的同名 cookie 会互相覆盖，导致每隔十几秒就被踢下线。改用独占名称隔离。
+app.config["SESSION_COOKIE_NAME"] = "wps_cloud_sid"
+app.config["SESSION_COOKIE_PATH"] = "/"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+
+# ─── 认证诊断：每个受保护请求打印 cookie / session 状态，定位“登录后秒退”
+# 输出到 stdout（docker logs 可见）。线上稳定后可注释掉。
+@app.before_request
+def _auth_diag():
+    p = request.path
+    if p.startswith(("/api/", "/admin/")) or p == "/" or p.startswith("/play/") or p.startswith("/img/"):
+        ck_name = app.config["SESSION_COOKIE_NAME"]
+        has_cookie = bool(request.cookies.get(ck_name))
+        # 当前进程的密钥签名后 8 位，用来判断请求是否落在“换了密钥的另一个进程”
+        sig = hashlib.sha256(app.secret_key.encode("utf-8")).hexdigest()[:8]
+        print(f"[auth] {request.method} {p} "
+              f"cookie={'Y' if has_cookie else 'N'} "
+              f"sid={session.get('logged_in')} "
+              f"adm={session.get('admin_logged_in')} "
+              f"key={sig} "
+              f"host={request.host} "
+              f"xff={request.headers.get('X-Forwarded-For', '-')}",
+              flush=True)
+
 
 # ══════════════════════════════════════════════════
 # 蓝图注册（路由按功能拆分到独立模块）
@@ -83,6 +161,7 @@ from .routes_transfer import bp as transfer_bp
 from .routes_strm import bp as strm_bp
 from .routes_chase import bp as chase_bp
 from .routes_client import bp as client_bp
+from .routes_telegram import bp as telegram_bp
 
 app.register_blueprint(public_bp)
 app.register_blueprint(admin_bp)
@@ -90,6 +169,7 @@ app.register_blueprint(transfer_bp)
 app.register_blueprint(strm_bp)
 app.register_blueprint(chase_bp)
 app.register_blueprint(client_bp)
+app.register_blueprint(telegram_bp)
 
 # 兜底：未匹配路由渲染首页（前端路由由 page_lock/index 处理）
 @app.route("/healthz")
@@ -114,9 +194,9 @@ def _handle_uncaught(exc):
 # ══════════════════════════════════════════════════
 # 启动
 # ══════════════════════════════════════════════════
-if __name__ == "__main__":
-    cfg = load_config() 
-    port = cfg.get("server_port", 58000)
+def run_server():
+    cfg = load_config()
+    port = int(cfg.get("server_port", 58000))
     print("=" * 55)
     print("  WPS 365 云盘管理面板 v2")
     print("=" * 55)
@@ -126,7 +206,25 @@ if __name__ == "__main__":
     print(f"  定时调度: 追更/STRM 按各自时间表自动执行")
     print(f"  按 Ctrl+C 停止")
     print("=" * 55)
+    # 启动时清理过期的临时文件，避免磁盘被历史大文件占满
+    try:
+        n = cleanup_temp_dir(cfg.get("temp_download_dir") or os.path.join(DATA_DIR, "temp_downloads"))
+        if n:
+            print(f"[cleanup] 已清理 {n} 个过期临时文件")
+    except Exception:
+        pass
     threading.Thread(target=_unified_scheduler, daemon=True).start()
     from .tunnel_client import start_tunnel_if_configured
     start_tunnel_if_configured(cfg)
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    # 优先用 waitress（生产级 WSGI，避免 Flask 内置服务器的并发/稳定性问题）
+    try:
+        from waitress import serve
+        print("  WSGI: waitress")
+        serve(app, host="0.0.0.0", port=port, threads=12, channel_timeout=900, _quiet=True)
+    except ImportError:
+        print("  WSGI: Flask 内置服务器（建议 pip install waitress 提升稳定性）")
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    run_server()

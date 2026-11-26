@@ -113,10 +113,15 @@ class ClientWorker:
                 if d.get("success"):
                     wps_cookie = (d.get("wps_cookie") or "").strip()
                     clouds = d.get("clouds") or []
-                    if wps_cookie or clouds:
-                        self._server_creds = {"wps_cookie": wps_cookie, "clouds": clouds}
+                    tg_session = (d.get("tg_session") or "").strip()
+                    if wps_cookie or clouds or tg_session:
+                        self._server_creds = {"wps_cookie": wps_cookie, "clouds": clouds,
+                                              "tg_api_id": d.get("tg_api_id") or "",
+                                              "tg_api_hash": d.get("tg_api_hash") or "",
+                                              "tg_session": tg_session}
                         _types = ",".join(sorted({str(c.get("type", "")) for c in clouds if c.get("type")}))
-                        self.log_cb(f"已获取服务端网盘凭据（WPS: {'已配置' if wps_cookie else '未配置'}，云盘: {_types or '无'}）")
+                        self.log_cb(f"已获取服务端凭据（WPS: {'已配置' if wps_cookie else '未配置'}，"
+                                    f"云盘: {_types or '无'}，TG下载会话: {'已配置' if tg_session else '未配置'}）")
                         return self._server_creds
         except Exception:
             pass
@@ -161,6 +166,7 @@ class ClientWorker:
                           "max_concurrent": str(max_conc), "check_cancel": "1",
                           "running_tids": running_ids,
                           "version": CLIENT_VERSION,
+                          "platform": "mobile",
                           "cloud_types": cloud_types}
                 r = session.get(f"{url}/api/client/poll", params=params, timeout=(10, 30))
                 if r.status_code == 200:
@@ -337,6 +343,8 @@ class ClientWorker:
                     self._exec_chase_check(session, url, task)
                 elif ttype == "chase-download":
                     self._exec_chase_download(session, url, task)
+                elif ttype == "tg-download":
+                    self._exec_tg_download(session, url, task)
                 else:
                     self._exec_normal_task(session, url, task)
             finally:
@@ -520,6 +528,92 @@ class ClientWorker:
         self._post_task_status(session, url, tid, "done", "服务端已处理")
 
     # ── 追更下载 ──
+
+    def _exec_tg_download(self, session, url, task):
+        """Telegram 资源：手机端直连 TG 下载 → 上传 WPS"""
+        tid = task.get("id", "")
+        name = task.get("file_name") or task.get("name") or "tg_file"
+        cfg = load_config()
+        srv = self._server_creds or {}
+        tg_sess = (srv.get("tg_session") or "").strip() or (cfg.get("tg_session") or "").strip()
+        api_id = (srv.get("tg_api_id") or "").strip() or cfg.get("tg_api_id", "")
+        api_hash = (srv.get("tg_api_hash") or "").strip() or cfg.get("tg_api_hash", "")
+        if not tg_sess:
+            self._post_task_status(session, url, tid, "failed",
+                                   "服务端未配置 Telegram 下载会话，请联系管理员在后台扫码添加")
+            return
+        cookie = (srv.get("wps_cookie") or "").strip() or cfg.get("wps_cookie", "")
+        if not cookie:
+            self._post_task_status(session, url, tid, "failed", "未配置 WPS Cookie")
+            return
+        try:
+            save_dir = get_save_dir()
+        except Exception:
+            save_dir = cfg.get("save_dir") or "."
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except Exception:
+            pass
+        dest = os.path.join(save_dir, name)
+        cancel_evt = self._cancel_events.get(tid)
+        _prog_last = [0.0]
+
+        def tcb(stage, dl, total, speed):
+            spd_txt = ("%.2fMB/s" % speed) if speed else ""
+            self.progress_cb(tid, name, stage, dl, total, spd_txt)
+            now_t = time.time()
+            if now_t - _prog_last[0] >= 3.0:
+                _prog_last[0] = now_t
+                self._post_task_progress(session, url, tid, stage, dl, total, speed)
+
+        self.log_cb(f"[TG] 开始下载：{name}")
+        t0 = time.time()
+        try:
+            from tg_downloader import TgDownloader
+            dl = TgDownloader(api_id, api_hash, tg_sess,
+                              proxy=(cfg.get("tg_proxy") or None))
+
+            def _dl_cb(cur, tot):
+                spd = (cur / max(0.001, time.time() - t0) / 1048576.0) if cur else 0
+                tcb("download", cur, tot, spd)
+
+            ok, err = dl.download(task.get("channel_value") or task.get("chat_id"),
+                                  task.get("msg_id"), dest, _dl_cb, cancel_evt,
+                                  log_cb=lambda m: self.log_cb("[TG] " + m))
+            if not ok:
+                self.log_cb(f"[TG] 下载失败：{err}")
+                self._post_task_status(session, url, tid, "failed", err)
+                return
+            self.log_cb(f"[TG] 下载完成，开始上传：{name}")
+            from transfer_mobile import TransferEngine
+            pid = (cfg.get("wps_parent_id") or "0").strip() or "0"
+            _engine = TransferEngine("", cookie, save_dir, wps_parent_id=pid,
+                                     src_client=False)
+            _wp = (task.get("wps_path") or "").strip()
+            if _wp:
+                try:
+                    pid = str(_engine._wps_ensure_path(_wp, self.log_cb) or pid)
+                except Exception:
+                    pass
+            up = _engine.wps
+            code, res = up.upload_file_from_disk(
+                dest, name, parent_id=pid,
+                cancel_check=(lambda: bool(cancel_evt and cancel_evt.is_set())))
+            if code == 200 or (isinstance(res, dict) and res.get("success")):
+                self.log_cb(f"[TG] 上传完成：{name}")
+                self._post_task_status(session, url, tid, "done", "下载并上传完成")
+            else:
+                self.log_cb(f"[TG] 上传失败：{res}")
+                self._post_task_status(session, url, tid, "failed", f"上传失败：{res}")
+        except Exception as e:
+            self.log_cb(f"[TG] 任务异常：{e}")
+            self._post_task_status(session, url, tid, "failed", f"异常：{e}")
+        finally:
+            try:
+                if os.path.isfile(dest):
+                    os.remove(dest)
+            except Exception:
+                pass
 
     def _exec_chase_download(self, session, url, task):
         # ── 批量任务：多集流水线（上传本集时并行下载下一集），每集单独上报 ──

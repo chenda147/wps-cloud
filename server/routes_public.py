@@ -11,11 +11,13 @@ server/routes_public.py
 """
 import os
 import sys
+import re
 import json
 import time
 import datetime
+import mimetypes
 import traceback
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse, parse_qs
 
 from flask import (
     Blueprint, request, jsonify, session, redirect, url_for, Response, send_file, stream_with_context,
@@ -23,7 +25,7 @@ from flask import (
 from flask import render_template as _render
 
 from .state import (
-    DEFAULT_GROUP_ID, VIDEO_EXTS, IMAGE_EXTS, AUDIO_EXTS,
+    DEFAULT_GROUP_ID, VIDEO_EXTS, IMAGE_EXTS, AUDIO_EXTS, SERVER_BUILD,
 )
 from .utils import (
     load_config, get_wps_client, _check_password, _get_mount_client_and_root,
@@ -35,7 +37,8 @@ bp = Blueprint("public", __name__)
 
 @bp.route("/")
 def public_index():
-    if session.get("admin_logged_in"):
+    # 后台登录（/api/login）只写 logged_in，解锁页写 admin_logged_in，这里两者都认
+    if session.get("admin_logged_in") or session.get("logged_in"):
         return _render("index.html")
     return _render("page_lock.html")
 
@@ -49,6 +52,7 @@ def api_page_unlock():
     if user != cfg.get("username", "admin"):
         return jsonify({"success": False, "message": "用户名或密码错误"})
     if _check_password(cfg.get("password", ""), pw):
+        session.permanent = True
         session["admin_logged_in"] = True
         session["logged_in"] = True
         session["username"] = user
@@ -140,7 +144,8 @@ def api_public_files():
 
 @bp.route("/api/public/auth_status")
 def api_public_auth_status():
-    return jsonify({"logged_in": session.get("logged_in", False)})
+    return jsonify({"logged_in": session.get("logged_in", False),
+                    "build": SERVER_BUILD})
 
 
 @bp.route("/api/public/share_url/<file_id>")
@@ -154,7 +159,10 @@ def api_public_share_url(file_id):
         host = request.host_url.rstrip("/")
         mc = request.args.get("mount_ctx", "").strip()
         qs = f"?mount_ctx={mc}" if mc else ""
-        proxy_url = f"{host}/stream/{file_id}{qs}"
+        f = client.get_file_info(DEFAULT_GROUP_ID, file_id)
+        fname = (f.get("fname") or f.get("name") or "file") if f else "file"
+        # URL 末尾带真实文件名/扩展名，媒体服务器（Emby/Jellyfin）才能识别容器格式
+        proxy_url = f"{host}/stream/{file_id}/{quote(fname)}{qs}"
 
         cdn_url = None
         try:
@@ -162,8 +170,6 @@ def api_public_share_url(file_id):
         except Exception:
             pass
 
-        f = client.get_file_info(DEFAULT_GROUP_ID, file_id)
-        fname = (f.get("fname") or f.get("name") or "file") if f else "file"
         print(f"[SHARE] proxy_url={proxy_url} fname={fname}", flush=True, file=_sys.stderr)
         return jsonify({"url": proxy_url, "wps_url": cdn_url, "filename": fname})
     except Exception as e:
@@ -366,6 +372,44 @@ def api_public_search():
         return jsonify({"success": False, "error": str(e), "files": []})
 
 
+_VIDEO_MIME = {
+    ".mkv": "video/x-matroska",
+    ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
+    ".ts": "video/mp2t",
+    ".m2ts": "video/mp2t",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+    ".flv": "video/x-flv",
+    ".wmv": "video/x-ms-wmv",
+    ".rmvb": "video/vnd.rn-realvideo",
+    ".webm": "video/webm",
+}
+
+
+def _cdn_filename(cdn_url):
+    """从 WPS 直链的 response-content-disposition 参数中取真实文件名。"""
+    try:
+        qs = parse_qs(urlparse(cdn_url).query)
+        disp = (qs.get("response-content-disposition") or [""])[0]
+        # WPS 会做多层 URL 编码，统一解两次再提取
+        disp = unquote(unquote(disp))
+        m = re.search(r"filename\*?\s*=\s*([^;]+)", disp, re.I)
+        if not m:
+            return ""
+        name = m.group(1).strip().strip('"')
+        # 去掉 RFC5987 的 charset'lang' 前缀（如 UTF-8''）
+        name = re.sub(r"^[A-Za-z0-9_-]+'[A-Za-z0-9_-]*'", "", name)
+        return unquote(name).strip()
+    except Exception:
+        return ""
+
+
+def _video_content_type(filename):
+    ext = os.path.splitext(filename or "")[1].lower()
+    return _VIDEO_MIME.get(ext) or mimetypes.guess_type(filename or "")[0] or ""
+
+
 def _proxy_cdn(file_id, mount_ctx, as_attachment=False, filename=None):
     """从 WPS API 获取 CDN 直链，再用 Flask 代理请求（带正确 Referer），支持 Range。"""
     client, err = get_wps_client()
@@ -394,7 +438,10 @@ def _proxy_cdn(file_id, mount_ctx, as_attachment=False, filename=None):
     except Exception as e:
         return jsonify({"error": f"请求CDN失败: {e}"}), 502
 
-    content_type = r.headers.get("Content-Type", "application/octet-stream")
+    cdn_name = _cdn_filename(cdn_url)
+    content_type = r.headers.get("Content-Type", "")
+    if not content_type or content_type in ("application/octet-stream", "binary/octet-stream", "application/unknown"):
+        content_type = _video_content_type(cdn_name) or content_type or "application/octet-stream"
     resp_headers = {"Content-Type": content_type, "Accept-Ranges": "bytes"}
 
     if r.status_code == 206:
@@ -421,6 +468,14 @@ def _proxy_cdn(file_id, mount_ctx, as_attachment=False, filename=None):
 
     if as_attachment and filename:
         resp_headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
+    elif cdn_name:
+        # 内联播放时把真实文件名带出去，Emby/播放器据此识别容器格式
+        resp_headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(cdn_name)}"
+
+    # Emby 探测常用 HEAD：只回头部，避免把整个文件拉一遍
+    if request.method == "HEAD":
+        r.close()
+        return Response(status=status_code, headers=resp_headers)
 
     def generate():
         try:
@@ -434,7 +489,8 @@ def _proxy_cdn(file_id, mount_ctx, as_attachment=False, filename=None):
 
 
 @bp.route("/api/public/stream/<file_id>")
-def api_public_stream(file_id):
+@bp.route("/api/public/stream/<file_id>/<path:name>")
+def api_public_stream(file_id, name=None):
     mount_ctx = request.args.get("mount_ctx", "").strip()
     return _proxy_cdn(file_id, mount_ctx, as_attachment=False)
 
@@ -453,7 +509,8 @@ def api_public_download(file_id):
 
 
 @bp.route("/stream/<file_id>")
-def public_stream_shortcut(file_id):
+@bp.route("/stream/<file_id>/<path:name>")
+def public_stream_shortcut(file_id, name=None):
     mount_ctx = request.args.get("mount_ctx", "")
     return _proxy_cdn(file_id, mount_ctx, as_attachment=False)
 
@@ -472,7 +529,8 @@ def public_dl_shortcut(file_id):
 
 
 @bp.route("/r/<file_id>")
-def public_redirect_cdn(file_id):
+@bp.route("/r/<file_id>/<path:name>")
+def public_redirect_cdn(file_id, name=None):
     """获取 WPS CDN 签名直链并 302 跳转，NAS 只处理一个轻量请求"""
     client, err = get_wps_client()
     mount_ctx = request.args.get("mount_ctx", "")

@@ -22,6 +22,30 @@ from config_helper import (
     CLIENT_VERSION, CONFIG_FILE, load_config, save_config, fmt_size, now,
 )
 
+
+def _split_progress_text(speed):
+    """拆分进度回调里的 "文件名 + 速度" 文本。
+
+    批量流水线回调格式为 "[2/11] S01E158...mkv 2.3MB/s"（seq + 速度）；
+    单集任务只传速度 "2.3MB/s"。返回 (文件名, 速度文本)。
+    """
+    fn, sp = "", (speed or "").strip()
+    m = re.match(r'^\[\d+/\d+\]\s*(.*)$', sp)
+    if m:
+        rest = m.group(1).strip()
+        # 跳过下载 / 等待上传的提示：文件名放文件名位，提示语作为状态文本
+        for _suf, _st in (("本地已存在，跳过下载", "跳过下载"),
+                          ("已下载完成，等待上传", "等待上传")):
+            if rest.endswith(_suf):
+                return rest[:-len(_suf)].strip(), _st
+        mm = re.match(r'^(.*?)\s+([\d.]+\s*[KMG]?B/s)$', rest, re.IGNORECASE)
+        if mm:
+            fn, sp = mm.group(1), mm.group(2)
+        else:
+            fn, sp = rest, ""
+    return fn, sp
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -324,37 +348,38 @@ class App:
     def _build_config(self, cfg):
         page = self._pages["config"]
 
-        c1 = self._card(page, "139 云盘（主账号）")
+        # 网盘 / Telegram 凭据全部由服务端下发，客户端不再提供输入框（连接服务器后自动填充）
         self.token_var = tk.StringVar(value=cfg.get("yidong_token", ""))
-        ttk.Label(c1, text="Token", style='Sub.TLabel').pack(anchor='w')
-        ttk.Entry(c1, textvariable=self.token_var, show="•",
-                 font=('微软雅黑', 10)).pack(fill=tk.X, pady=(2, 6))
-
-        # ── 夸克网盘（单输入框，和 139 主账号平级）──
-        qk = self._card(page, "夸克网盘")
         qk_cookie = ""
         for _c in cfg.get("clouds", []):
             if _c.get("type") == "quark":
                 qk_cookie = _c.get("cookie", "") or _c.get("token", "")
                 break
         self.quark_cookie_var = tk.StringVar(value=qk_cookie)
-        ttk.Label(qk, text="Cookie（从 pan.quark.cn 登录后 F12 复制请求里的 Cookie）",
-                  style='Sub.TLabel').pack(anchor='w')
-        ttk.Entry(qk, textvariable=self.quark_cookie_var, show="•",
-                 font=('微软雅黑', 10)).pack(fill=tk.X, pady=(2, 6))
-
-        # ── 云盘连接管理（支持 139 / 夸克 并存，自动识别）──
-        # 夸克配置已通过上方单输入框卡片管理，无需独立的多账号连接管理
         self.clouds = list(cfg.get("clouds", []))
-
-        c2 = self._card(page, "WPS 365")
         self.cookie_var = tk.StringVar(value=cfg.get("wps_cookie", ""))
         self.parent_var = tk.StringVar(value=cfg.get("wps_parent_id", "0"))
-        ttk.Label(c2, text="Cookie", style='Sub.TLabel').pack(anchor='w')
-        ttk.Entry(c2, textvariable=self.cookie_var, show="•",
-                 font=('微软雅黑', 10)).pack(fill=tk.X, pady=(2, 6))
-        ttk.Label(c2, text="文件夹ID（0=根目录）", style='Sub.TLabel').pack(anchor='w')
-        ttk.Entry(c2, textvariable=self.parent_var, font=('微软雅黑', 10)).pack(fill=tk.X, pady=(2, 6))
+        self.tg_api_id_var = tk.StringVar(value=str(cfg.get("tg_api_id", "")))
+        self.tg_api_hash_var = tk.StringVar(value=cfg.get("tg_api_hash", ""))
+        self.tg_session = cfg.get("tg_session", "")
+
+        c1 = self._card(page, "WPS 365")
+        ttk.Label(c1, text="网盘凭据（WPS Cookie / 139 / 夸克）由服务端下发，连接服务器后自动生效",
+                  style='Sub.TLabel').pack(anchor='w', pady=(0, 6))
+        ttk.Label(c1, text="文件夹ID（0=根目录）", style='Sub.TLabel').pack(anchor='w')
+        ttk.Entry(c1, textvariable=self.parent_var, font=('微软雅黑', 10)).pack(fill=tk.X, pady=(2, 6))
+
+        ctg = self._card(page, "Telegram（直连下载）")
+        ttk.Label(ctg, text="api_id / api_hash / 下载会话均由服务端下发，连接服务器后自动生效",
+                  style='Sub.TLabel').pack(anchor='w')
+        self.tg_proxy_var = tk.StringVar(value=cfg.get("tg_proxy", ""))
+        ttk.Label(ctg, text="代理（国内网络必填，如 socks5://127.0.0.1:7890 或 http://127.0.0.1:7890）",
+                  style='Sub.TLabel').pack(anchor='w')
+        ttk.Entry(ctg, textvariable=self.tg_proxy_var, font=('微软雅黑', 10)).pack(
+            fill=tk.X, pady=(2, 6))
+        self.tg_state_lbl = ttk.Label(ctg, text=("下载会话已配置" if self.tg_session else "等待服务端下发下载会话"),
+                                      style='Sub.TLabel')
+        self.tg_state_lbl.pack(anchor='w')
 
         c3 = self._card(page, "本地目录")
         self.dir_var = tk.StringVar(value=cfg.get("save_dir",
@@ -408,9 +433,53 @@ class App:
             "max_concurrent": mc,
             "upload_slow_min_mb": self._upload_slow_mb(),
             "upload_slow_seconds": self._upload_slow_sec(),
+            "tg_api_id": self.tg_api_id_var.get().strip(),
+            "tg_api_hash": self.tg_api_hash_var.get().strip(),
+            "tg_proxy": self.tg_proxy_var.get().strip(),
+            "tg_session": self.tg_session,
         })
         save_config(cfg)
         messagebox.showinfo("成功", "配置已保存")
+
+    def _apply_server_creds(self):
+        """服务端下发凭据后自动填充全部凭据（客户端不再需要任何手填输入框）"""
+        c = self._server_creds or {}
+        try:
+            if c.get("wps_cookie"):
+                self.cookie_var.set(str(c.get("wps_cookie")))
+            clouds = c.get("clouds") or []
+            for _c in clouds:
+                if _c.get("type") == "yidong" and _c.get("token"):
+                    self.token_var.set(str(_c["token"]))
+                    break
+            for _c in clouds:
+                if _c.get("type") == "quark" and _c.get("cookie"):
+                    self.quark_cookie_var.set(str(_c["cookie"]))
+                    break
+            if c.get("tg_api_id"):
+                self.tg_api_id_var.set(str(c.get("tg_api_id")))
+            if c.get("tg_api_hash"):
+                self.tg_api_hash_var.set(str(c.get("tg_api_hash")))
+            if c.get("tg_session"):
+                self.tg_session = str(c.get("tg_session"))
+        except Exception:
+            pass
+        try:
+            self.tg_state_lbl.config(
+                text=("下载会话已下发" if (self.tg_session and self.tg_api_id_var.get().strip())
+                      else "服务端未配置下载会话，TG 任务将无法执行"))
+        except Exception:
+            pass
+
+    def _open_file(self, path):
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self._log("无法自动打开，请手动打开：%s（%s）" % (path, e))
 
     def _upload_slow_mb(self):
         """读取上传慢速阈值(MB/s)，非法/空返回0（不启用）"""
@@ -617,10 +686,15 @@ class App:
                 if d.get("success"):
                     wps_cookie = (d.get("wps_cookie") or "").strip()
                     clouds = d.get("clouds") or []
-                    if wps_cookie or clouds:
-                        self._server_creds = {"wps_cookie": wps_cookie, "clouds": clouds}
+                    tg_session = (d.get("tg_session") or "").strip()
+                    if wps_cookie or clouds or tg_session:
+                        self._server_creds = {"wps_cookie": wps_cookie, "clouds": clouds,
+                                              "tg_api_id": d.get("tg_api_id") or "",
+                                              "tg_api_hash": d.get("tg_api_hash") or "",
+                                              "tg_session": tg_session}
                         _types = ",".join(sorted({str(c.get("type", "")) for c in clouds if c.get("type")}))
-                        self._log(f"已获取服务端网盘凭据（WPS: {'已配置' if wps_cookie else '未配置'}，云盘: {_types or '无'}）")
+                        self._log(f"已获取服务端凭据（WPS: {'已配置' if wps_cookie else '未配置'}，"
+                                  f"云盘: {_types or '无'}，TG下载会话: {'已配置' if tg_session else '未配置'}）")
                         return self._server_creds
         except Exception:
             pass
@@ -643,6 +717,10 @@ class App:
         max_conc = self._max_concurrent
         # 连接成功后自动拉取服务端网盘凭据（临时缓存），此后无需本地手动配置
         self._server_creds = self._fetch_server_creds(session, url, client_name)
+        try:
+            self.root.after(0, self._apply_server_creds)
+        except Exception:
+            pass
         self._log(f"已连接 {url}，客户端: {client_name}，并发: {max_conc}，开始轮询")
         self._srv_status(f"轮询中({max_conc}并发)", self.成功色)
         self._srv_session = session; self._srv_url = url
@@ -802,14 +880,21 @@ class App:
             return
         self._prog_last_ts[0] = now_t
         try:
-            srv.post(f"{url}/api/client/task_status",
-                     json={"id": tid, "status": "running",
-                           "stage": str(stage or ""),
-                           "progress": int(dl or 0), "total": int(total or 0),
-                           "speed": float(speed or 0)},
-                     timeout=6)
+            _sp = float(speed or 0)
         except Exception:
-            pass
+            _m = re.match(r'([\d.]+)', str(speed or ""))
+            _sp = float(_m.group(1)) if _m else 0.0
+        _payload = {"id": tid, "status": "running",
+                    "stage": str(stage or ""),
+                    "progress": int(dl or 0), "total": int(total or 0),
+                    "speed": _sp}
+        # 上报放后台线程：不能阻塞下载线程的事件循环
+        def _bg_post():
+            try:
+                srv.post(f"{url}/api/client/task_status", json=_payload, timeout=6)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_post, daemon=True).start()
 
     def _post_chase_done(self, session, url, chase_id, ep_num, ok, error="", file_name="", retries=3):
         """上报追更集完成状态，带重试（chase_done 丢失会导致漏集误判/重复补漏）。
@@ -857,6 +942,8 @@ class App:
                     self._exec_chase_check(session, url, task)
                 elif ttype == "chase-download":
                     self._exec_chase_download(session, url, task)
+                elif ttype == "tg-download":
+                    self._exec_tg_download(session, url, task)
                 else:
                     self._exec_normal_task(session, url, task)
             finally:
@@ -874,6 +961,137 @@ class App:
                     with self._cancel_events_lock:
                         self._cancel_events.pop(tid, None)
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _exec_tg_download(self, session, url, task):
+        """Telegram 资源：优先用手机官方客户端下载（fckvip 加速通道），失败回退 Telethon 直连 → 上传 WPS"""
+        tid = task.get("id", "")
+        name = task.get("file_name") or task.get("name") or "tg_file"
+        cfg = load_config()
+
+        def _fail_task(msg):
+            self._on_task_progress(tid, name, "error", 0, 0, "")
+            self._post_task_status(session, url, tid, "failed", msg)
+
+        srv = self._server_creds or {}
+        cookie = (srv.get("wps_cookie") or "").strip() or cfg.get("wps_cookie", "")
+        if not cookie:
+            _fail_task("未配置 WPS Cookie")
+            return
+        save_dir = cfg.get("save_dir") or os.path.join(os.path.expanduser("~"), "Downloads")
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except Exception:
+            pass
+        dest = os.path.join(save_dir, name)
+        cancel_evt = self._cancel_events.get(tid)
+        t0 = time.time()
+        self._log(f"[TG] 开始下载：{name}")
+        try:
+            attempted, got = self._tg_download_by_phone(task, dest, tid, name, cfg)
+            if not got and attempted:
+                _fail_task("手机端下载失败（未取到文件）")
+                return
+            if not got:
+                self._log("[TG] 手机端不可用，回退 Telethon 直连下载")
+                tg_sess = (srv.get("tg_session") or "").strip() or cfg.get("tg_session", "")
+                api_id = (srv.get("tg_api_id") or "").strip() or cfg.get("tg_api_id", "")
+                api_hash = (srv.get("tg_api_hash") or "").strip() or cfg.get("tg_api_hash", "")
+                if not tg_sess:
+                    _fail_task("手机未连接，且服务端未配置 Telegram 下载会话")
+                    return
+                if not api_id or not api_hash:
+                    _fail_task("手机未连接，且服务端未下发 api_id/api_hash")
+                    return
+                from tg_downloader import TgDownloader
+                dl = TgDownloader(api_id, api_hash, tg_sess,
+                                  proxy=(cfg.get("tg_proxy") or None),
+                                  connections=cfg.get("tg_connections") or 8,
+                                  desktop_fp=cfg.get("tg_desktop_fp", True))
+
+                def _dl_cb(cur, tot):
+                    spd = (cur / max(0.001, time.time() - t0)) if cur else 0
+                    spd_txt = ("%.1fMB/s" % (spd / 1048576.0)) if spd else ""
+                    self._on_task_progress(tid, name, "download", cur, tot, spd_txt)
+
+                ok, err = dl.download(task.get("channel_value") or task.get("chat_id"),
+                                      task.get("msg_id"), dest, _dl_cb, cancel_evt,
+                                      log_cb=lambda m: self._log("[TG] " + m))
+                if not ok:
+                    self._log(f"[TG] 下载失败：{err}")
+                    _fail_task(err)
+                    return
+            self._log(f"[TG] 下载完成，开始上传：{name}")
+            from transfer_engine import TransferEngine
+            pid = (cfg.get("wps_parent_id") or "0").strip() or "0"
+            wps_path = (task.get("wps_path") or "").strip()
+            _engine = TransferEngine("", cookie, save_dir, wps_parent_id=pid,
+                                     src_client=False)
+            if wps_path:
+                # 追更 TG 任务：上传到与该追更分享任务一致的 WPS 目录
+                try:
+                    pid = str(_engine._wps_ensure_path(wps_path, self._log) or pid)
+                except Exception:
+                    pass
+            up = _engine.wps
+
+            def _up_cb(pct, speed):
+                self._on_task_progress(tid, name, "upload", pct, 100, "")
+
+            code, res = up.upload_file_from_disk(
+                dest, name, parent_id=pid, progress_cb=_up_cb,
+                cancel_check=(lambda: bool(cancel_evt and cancel_evt.is_set())))
+            if code == 200 or (isinstance(res, dict) and res.get("success")):
+                self._log(f"[TG] 上传完成：{name}")
+                self._on_task_progress(tid, name, "done", 0, 0, "")
+                self._post_task_status(session, url, tid, "done", "下载并上传完成")
+            else:
+                self._log(f"[TG] 上传失败：{res}")
+                _fail_task(f"上传失败：{res}")
+        except Exception as e:
+            self._log(f"[TG] 任务异常：{e}")
+            _fail_task(f"异常：{e}")
+        finally:
+            try:
+                if os.path.isfile(dest):
+                    os.remove(dest)
+            except Exception:
+                pass
+
+    def _tg_download_by_phone(self, task, dest, tid, name, cfg):
+        """用 USB 连接的手机官方 Telegram App 下载（实测 4~5MB/s）。
+        返回 (是否尝试过手机下载, 成功时的 dest 路径)。未尝试时调用方回退 Telethon。"""
+        adb = (cfg.get("phone_adb") or "").strip()
+        if not adb and os.path.isfile(r"C:\temp\MsmDownloadTool\Adb.exe"):
+            adb = r"C:\temp\MsmDownloadTool\Adb.exe"
+        if not adb or not os.path.isfile(adb):
+            return False, None
+        channel = task.get("channel_value") or task.get("chat_id")
+        msg_id = task.get("msg_id")
+        if not channel or not msg_id:
+            return False, None
+        try:
+            import phone_download as pd
+        except Exception as e:
+            self._log(f"[TG] 手机下载模块不可用：{e}")
+            return False, None
+        serial = (cfg.get("phone_serial") or "").strip()
+        if not serial:
+            devs = pd.adb_devices(adb)
+            if not devs:
+                self._log("[TG] 未检测到已连接的手机")
+                return False, None
+            serial = devs[0]
+        self._log(f"[TG] 使用手机官方客户端下载（{serial}）")
+
+        def _p_cb(speed_mb):
+            self._on_task_progress(tid, name, "download", 0, 0, "%.2fMB/s" % speed_mb)
+
+        try:
+            return True, pd.download(adb, serial, str(channel).lstrip("@"), msg_id, dest,
+                                     log=lambda m: self._log(m), progress=_p_cb)
+        except Exception as e:
+            self._log(f"[TG] 手机下载异常：{e}")
+            return True, None
 
     def _make_engine(self, share_url, wps_parent_id=None, cloud_id=None):
         """按分享链接自动选择下载源（139 / 夸克），构造传输引擎。上传侧不变。"""
@@ -1477,38 +1695,72 @@ class App:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _on_task_progress(self, tid, name, stage, dl, total, speed):
-        """每个任务独立的进度回调（在线程中调用，主线程更新 UI）"""
+        """每个任务独立的进度回调（在线程中调用，主线程更新 UI）
+
+        批量流水线会同时跑「1 个下载 + 1 个上传」，因此分两行展示：
+        下载行、上传行各自独立的文件名/进度条/速度，不再挤在一行里。
+        """
         self._report_task_progress(tid, stage, dl, total, speed)
         def _u():
             w = self._ensure_task_widget(tid, name)
             names = {"list":"获取列表","download":"下载中","extract":"解压中","rename":"处理中",
                     "upload":"上传中","done":"完成","error":"失败"}
-            w['stage_var'].set(names.get(stage, stage))
-            if total > 0 and dl >= 0:
-                pct = min(100, int(dl / total * 100 + 0.5))
-                w['pb']['value'] = pct
-                w['detail_var'].set(f"{fmt_size(dl)} / {fmt_size(total)}  ·  {pct}%")
-            elif dl > 0:
-                w['detail_var'].set(fmt_size(dl))
-            if speed:
-                w['speed_var'].set(speed)
+            # 阶段归属：list/download/extract/rename → 下载行；upload → 上传行
+            if stage == "queued":
+                # “已下载完成，等待上传”单独一行展示，不占用下载/上传行
+                ql = w['queue_lane']
+                txt = (speed or "").strip()
+                if not txt:
+                    ql['fn_var'].set("—")
+                    ql['stage_var'].set("")
+                else:
+                    fn, st = _split_progress_text(txt)
+                    ql['fn_var'].set((fn or txt)[:60])
+                    ql['stage_var'].set(st or "等待上传")
+                self._task_last_dl[tid] = (time.time(), dl)
+                return
+            lane_key = None
+            if stage == "upload":
+                lane_key = "upload"
+            elif stage not in ("done", "error"):
+                lane_key = "download"
+            if lane_key:
+                lane = w['lanes'][lane_key]
+                fn, sp = _split_progress_text(speed)
+                if fn:
+                    lane['fn_var'].set(fn[:60])
+                lane['stage_var'].set(names.get(stage, stage))
+                if total > 0 and dl >= 0:
+                    pct = min(100, int(dl / total * 100 + 0.5))
+                    lane['pb']['value'] = pct
+                    lane['detail_var'].set(f"{fmt_size(dl)} / {fmt_size(total)}  ·  {pct}%")
+                elif dl > 0:
+                    lane['detail_var'].set(fmt_size(dl))
+                if sp:
+                    lane['speed_var'].set(sp)
             # 记录最后有数据变化的时间（用于停滞检测）
             self._task_last_dl[tid] = (time.time(), dl)
             if stage == "done":
-                w['pb']['value'] = 100
-                w['stage_var'].set("完成")
-                w['speed_var'].set("")
+                for lane in w['lanes'].values():
+                    lane['pb']['value'] = 100
+                    lane['stage_var'].set("完成")
+                    lane['speed_var'].set("")
+                w['queue_lane']['fn_var'].set("—")
+                w['queue_lane']['stage_var'].set("")
                 self.root.after(8000, lambda t=tid: self._remove_task_widget(t))
             elif stage == "error":
-                w['pb']['value'] = 0
-                w['stage_var'].set("失败")
+                for lane in w['lanes'].values():
+                    lane['pb']['value'] = 0
+                w['lanes']['download']['stage_var'].set("失败")
+                w['queue_lane']['fn_var'].set("—")
+                w['queue_lane']['stage_var'].set("")
                 if speed:
-                    w['speed_var'].set(str(speed))
+                    w['lanes']['download']['speed_var'].set(str(speed))
                 self.root.after(8000, lambda t=tid: self._remove_task_widget(t))
         self.root.after(0, _u)
 
     def _ensure_task_widget(self, tid, name):
-        """获取或创建任务卡片，返回 widget dict"""
+        """获取或创建任务卡片（下载/上传分两行），返回 widget dict"""
         if tid in self._task_widgets:
             return self._task_widgets[tid]
         # 卡片容器
@@ -1519,21 +1771,44 @@ class App:
         hdr.pack(fill=tk.X, padx=10, pady=(8, 2))
         ttk.Label(hdr, text=name[:50], style='Card.TLabel',
                  font=('微软雅黑', 10, 'bold')).pack(side=tk.LEFT)
-        # 进度条
-        pb = ttk.Progressbar(card, style='Mod.Horizontal.TProgressbar', mode='determinate')
-        pb.pack(fill=tk.X, padx=10, pady=(4, 2))
-        # 信息栏
-        info = ttk.Frame(card, style='Card.TFrame')
-        info.pack(fill=tk.X, padx=10, pady=(0, 8))
-        stage_var = tk.StringVar(value="就绪")
-        detail_var = tk.StringVar(value="")
-        speed_var = tk.StringVar(value="")
-        ttk.Label(info, textvariable=stage_var, style='Sub.TLabel').pack(side=tk.LEFT)
-        ttk.Label(info, textvariable=detail_var, style='Sub.TLabel').pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Label(info, textvariable=speed_var, style='Card.TLabel',
-                 foreground=self.主色, font=('微软雅黑', 9, 'bold')).pack(side=tk.RIGHT)
-        w = {'card': card, 'pb': pb, 'stage_var': stage_var,
-             'detail_var': detail_var, 'speed_var': speed_var}
+        # 下载行 + 上传行：各自独立的文件名、进度条、大小/百分比、速度
+        lanes = {}
+        for key, text in (("download", "下载"), ("upload", "上传")):
+            lane = ttk.Frame(card, style='Card.TFrame')
+            lane.pack(fill=tk.X, padx=10, pady=(4 if key == "download" else 6, 0))
+            top = ttk.Frame(lane, style='Card.TFrame')
+            top.pack(fill=tk.X)
+            ttk.Label(top, text=text, style='Sub.TLabel', width=4).pack(side=tk.LEFT)
+            fn_var = tk.StringVar(value="—")
+            ttk.Label(top, textvariable=fn_var, style='Sub.TLabel').pack(side=tk.LEFT)
+            speed_var = tk.StringVar(value="")
+            ttk.Label(top, textvariable=speed_var, style='Card.TLabel',
+                      foreground=self.主色, font=('微软雅黑', 9, 'bold')).pack(side=tk.RIGHT)
+            pb = ttk.Progressbar(lane, style='Mod.Horizontal.TProgressbar', mode='determinate')
+            pb.pack(fill=tk.X, pady=(2, 0))
+            bot = ttk.Frame(lane, style='Card.TFrame')
+            bot.pack(fill=tk.X)
+            stage_var = tk.StringVar(value="等待中")
+            detail_var = tk.StringVar(value="")
+            ttk.Label(bot, textvariable=stage_var, style='Sub.TLabel').pack(side=tk.LEFT)
+            ttk.Label(bot, textvariable=detail_var, style='Sub.TLabel').pack(side=tk.LEFT, padx=(10, 0))
+            lanes[key] = {'pb': pb, 'stage_var': stage_var, 'detail_var': detail_var,
+                          'speed_var': speed_var, 'fn_var': fn_var}
+        ttk.Frame(card, style='Card.TFrame', height=8).pack(fill=tk.X)
+        # 第三行：已下载完成、等待上传（不占下载/上传行，单独提示）
+        qlane = ttk.Frame(card, style='Card.TFrame')
+        qlane.pack(fill=tk.X, padx=10, pady=(6, 0))
+        ttk.Label(qlane, text="待上传", style='Sub.TLabel', width=5).pack(side=tk.LEFT)
+        q_fn_var = tk.StringVar(value="—")
+        ttk.Label(qlane, textvariable=q_fn_var, style='Sub.TLabel').pack(side=tk.LEFT)
+        q_stage_var = tk.StringVar(value="")
+        ttk.Label(qlane, textvariable=q_stage_var, style='Sub.TLabel',
+                  foreground=self.次文本).pack(side=tk.RIGHT)
+        # 兼容旧引用（停滞检测等）指向下载行
+        d = lanes['download']
+        w = {'card': card, 'pb': d['pb'], 'stage_var': d['stage_var'],
+             'detail_var': d['detail_var'], 'speed_var': d['speed_var'], 'lanes': lanes,
+             'queue_lane': {'fn_var': q_fn_var, 'stage_var': q_stage_var}}
         self._task_widgets[tid] = w
         # 自动跳转到任务页
         if self._cur != "tasks":

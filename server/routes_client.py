@@ -2,6 +2,7 @@
 """server/routes_client.py - 客户端通信/心跳/任务下发
 """
 from flask import Blueprint, request, jsonify, session, redirect, url_for, Response, send_file, stream_with_context
+import json
 import time
 import re
 from datetime import datetime
@@ -136,7 +137,20 @@ def api_client_creds():
                            "cookie": acc.get("cookie") or ""})
     except Exception:
         clouds = []
-    return jsonify({"success": True, "wps_cookie": wps_cookie, "clouds": clouds})
+    tg_api_id, tg_api_hash, tg_session = "", "", ""
+    try:
+        from .routes_telegram import TG_CONFIG_FILE
+        with open(TG_CONFIG_FILE, "r", encoding="utf-8") as f:
+            _tg = json.load(f)
+        tg_api_id = _tg.get("api_id", "") or ""
+        tg_api_hash = _tg.get("api_hash", "") or ""
+        # 客户端下载专用会话：与服务端搜索会话相互独立，避免互踢
+        tg_session = _tg.get("client_session", "") or ""
+    except Exception:
+        pass
+    return jsonify({"success": True, "wps_cookie": wps_cookie, "clouds": clouds,
+                    "tg_api_id": tg_api_id, "tg_api_hash": tg_api_hash,
+                    "tg_session": tg_session})
 
 
 @bp.route("/api/client/poll")
@@ -148,6 +162,7 @@ def api_client_poll():
     client_max_concurrent = int(request.args.get("max_concurrent", "3"))
     client_version = request.args.get("version", "").strip()
     cloud_types = request.args.get("cloud_types", "").strip()
+    client_platform = request.args.get("platform", "").strip()
     now = time.time()
     # 注册/更新客户端（含并发能力）
     if client_name:
@@ -158,6 +173,7 @@ def api_client_poll():
             "ip": request.remote_addr,
             "max_concurrent": info.get("max_concurrent", client_max_concurrent),
             "version": client_version or info.get("version", ""),
+            "platform": client_platform or info.get("platform", ""),
             "cloud_types": set(cloud_types.split(",")) if cloud_types else info.get("cloud_types", set()),
             # 注意：registry 内部用 set 便于校验，但返回 JSON 前需转 list，否则 jsonify 报错导致客户端管理页 500
         })
@@ -284,7 +300,7 @@ def api_client_poll():
                         _chase_stopped_map[_ct.get("id", "")] = True
                 for _tid in list(_CLIENT_QUEUE):
                     _task = _CLIENT_TASKS.get(_tid)
-                    if not (_task and _task.get("type") == "chase-download"):
+                    if not (_task and _task.get("type") in ("chase-download", "tg-download")):
                         continue
                     _cid0 = _task.get("chase_id", "")
                     # 兜底：所属追更已停止 → 任务直接终结，防止任何漏网路径反复派发
@@ -326,6 +342,13 @@ def api_client_poll():
         for tid in list(_CLIENT_QUEUE):
             task = _CLIENT_TASKS.get(tid)
             if task and task.get("status") == "pending":
+                # TG 下载任务只派给手机客户端：必须借用手机上的 Telegram 官方客户端通道，
+                # PC 客户端（Telethon 直连）速度只有 0.1MB/s，不再参与领取。
+                # 追更/资源里显式指定了 target_client 的除外（按指定优先）。
+                if (task.get("type") == "tg-download"
+                        and not task.get("target_client")
+                        and client_platform != "mobile"):
+                    continue
                 # 该集最近被用户停止/取消（60 秒内）：不派发。即使任务已被 check
                 # 一次性创建进队列，只要该集上报过取消，就拒绝派发，防止刷屏
                 _ceps1 = task.get("ep_num")
@@ -451,7 +474,8 @@ def api_client_task_status():
         # 客户端成功路径先报 chase_done 再报 task_status(done)，正常走到这里时
         # done_eps 已含该集；此处兜底：若 chase_done 网络丢失/被并发覆盖，
         # 也能保证漏集补追不会把已上传完成的集重复推送（如斩神11集重复下载问题）。
-        if (status == "done" and _CLIENT_TASKS[tid].get("type") == "chase-download"):
+        if (status == "done"
+                and _CLIENT_TASKS[tid].get("type") in ("chase-download", "tg-download")):
             _cid = _CLIENT_TASKS[tid].get("chase_id", "")
             _epn = _CLIENT_TASKS[tid].get("ep_num", 0)
             if _cid and isinstance(_epn, int):
@@ -579,6 +603,10 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
             t["share_status"] = "invalid" if error else "valid"
             t["share_error"] = (str(error)[:300] if error else "")
             t["share_status_ts"] = _beijing_now().strftime("%m-%d %H:%M")
+            # TG 搜索源：缓存本次搜索到的文件名 → 消息定位，供派发 tg-download 使用
+            _tg_items = data.get("tg_items") or {}
+            if _tg_items:
+                t["tg_items"] = _tg_items
             # ── 追更已停止：不再创建任何下载/续扫任务，仅记录检查时间 ──
             if t.get("stopped"):
                 _save_chase(tasks)
@@ -653,7 +681,7 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
             for _tid0 in list(_CLIENT_QUEUE):
                 _t0 = _CLIENT_TASKS.get(_tid0)
                 if (_t0 and _t0.get("chase_id") == chase_id
-                        and _t0.get("type") == "chase-download"):
+                        and _t0.get("type") in ("chase-download", "tg-download")):
                     if _t0.get("batch"):
                         # 批量任务：其包含的所有集都视为已派发，避免重复下发
                         for _f0 in (_t0.get("files") or []):
@@ -992,10 +1020,11 @@ def _process_chase_result_locked(data, chase_id, episodes, error, siblings):
                         real_ep = int(m["ep"])
                     items.append((real_ep, siblings, m))
                     valid_count += 1
-                # 逐集创建独立下载任务：客户端按 max_concurrent 并发领取多个任务并行执行
-                # （一个任务在上传时，另一个任务在下载；上传锁保证同机同刻仅一个上传）。
-                for _ep, _sib, _man in items:
-                    _create_chase_download_task(t, _ep, _sib, _man)
+                # 打包为一个批量流水线任务：客户端按「下载1 → 上传1∥下载2 → …」
+                # 执行（下载闸门 + 上传全局锁），同一时刻严格 1 个下载 + 1 个上传。
+                # 若逐集建独立任务，客户端多并发槽位会同时下载两集（双下载抢带宽）。
+                if items:
+                    _create_chase_download_batch_tasks(t, items)
                 if valid_count < len(eps_sorted):
                     if valid_count == 0:
                         t["last_result"] = (f"发现 {len(eps_sorted)} 集但均不匹配 ep_pattern ({ep_pattern})，未下发下载"

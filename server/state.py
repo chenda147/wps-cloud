@@ -28,6 +28,8 @@ COOKIE_FILE = os.environ.get("COOKIE_FILE", os.path.join(DATA_DIR, "cookie_confi
 
 # 追更 / STRM 持久化文件（路径与原 app.py 内定义一致）
 CHASE_FILE = os.path.join(DATA_DIR, "chase_tasks.json")
+CLIENT_TASKS_FILE = os.path.join(DATA_DIR, "client_tasks.json")
+_CLIENT_TASKS_LOCK = threading.RLock()
 STRM_FILE = os.path.join(DATA_DIR, "strm_tasks.json")
 STRM_TASKS_FILE = STRM_FILE  # 向后兼容别名
 STORAGES_FILE = os.path.join(DATA_DIR, "storages.json")
@@ -40,6 +42,10 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".w
               ".rmvb", ".mpg", ".mpeg", ".3gp", ".ogv"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico", ".tiff"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".ape"}
+
+# 构建标记：每次修复“掉登录”问题时递增。用户在登录页 / 401 提示里看到这串，
+# 即可确认当前运行的是否为最新代码（避免改了代码但镜像没重建的假象）。
+SERVER_BUILD = "20261124-auth-2"
 
 # 挂载根目录缓存 {storage_id: real_folder_id}
 _mount_root_cache = {}
@@ -142,8 +148,9 @@ __all__ = [
     "_CLIENT_ACTIVE", "_CLIENT_DISPATCH_LOCK", "_stream_cache", "_QUARK_CLIENTS", "_YIDONG_CLIENTS",
     "scheduler_lock", "_scheduler_state", "_trigger_lock", "_trigger_state",
     "_load_chase", "_save_chase", "_load_strm_tasks", "_save_strm_tasks",
+    "CLIENT_TASKS_FILE", "_save_client_tasks", "_load_client_tasks", "_CLIENT_TASKS_LOCK",
     "DEFAULT_GROUP_ID", "VIDEO_EXTS", "IMAGE_EXTS", "AUDIO_EXTS",
-    "_mount_root_cache", "CLOUD_CONFIG_FILE",
+    "_mount_root_cache", "CLOUD_CONFIG_FILE", "SERVER_BUILD",
 ]
 
 
@@ -176,6 +183,56 @@ def _save_chase(tasks):
     with _CHASE_FILE_LOCK:
         from . import utils as _utils
         _utils.atomic_write_json(CHASE_FILE, tasks)
+
+
+# ══════════════════════════════════════════════════
+# 客户端任务队列持久化（防止服务重启丢失待下载任务）
+# ══════════════════════════════════════════════════
+def _save_client_tasks():
+    with _CLIENT_TASKS_LOCK:
+        from . import utils as _utils
+        payload = {
+            "tasks": list(_CLIENT_TASKS.values()),
+            "queue": list(_CLIENT_QUEUE),
+        }
+        try:
+            _utils.atomic_write_json(CLIENT_TASKS_FILE, payload)
+        except Exception:
+            pass
+
+
+def _load_client_tasks():
+    """启动时恢复未完成任务；running 视为未完成，重新置为 pending。"""
+    with _CLIENT_TASKS_LOCK:
+        if not os.path.exists(CLIENT_TASKS_FILE):
+            return
+        try:
+            with open(CLIENT_TASKS_FILE, "r", encoding="utf-8") as f:
+                payload = json.loads(f.read()) or {}
+        except Exception:
+            return
+        tasks = payload.get("tasks") or []
+        _CLIENT_TASKS.clear()
+        _CLIENT_QUEUE.clear()
+        for t in tasks:
+            if not isinstance(t, dict) or not t.get("id"):
+                continue
+            if t.get("status") in ("done", "error", "failed", "cancelled", "skipped"):
+                continue
+            if t.get("status") == "running":
+                t["status"] = "pending"
+                t["polled_by"] = ""
+                t.pop("polled_at", None)
+            _CLIENT_TASKS[t["id"]] = t
+        for tid in payload.get("queue") or []:
+            if tid in _CLIENT_TASKS and tid not in _CLIENT_QUEUE:
+                _CLIENT_QUEUE.append(tid)
+        for tid in _CLIENT_TASKS:
+            if tid not in _CLIENT_QUEUE:
+                _CLIENT_QUEUE.append(tid)
+        if _CLIENT_TASKS:
+            import logging
+            logging.getLogger(__name__).info("已恢复 %d 个客户端任务", len(_CLIENT_TASKS))
 
 
 # ══════════════════════════════════════════════════

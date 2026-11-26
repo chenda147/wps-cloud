@@ -14,6 +14,7 @@ import secrets
 import threading
 import uuid
 import traceback
+from urllib.parse import quote
 import logging
 from functools import wraps
 
@@ -111,9 +112,14 @@ def get_wps_client():
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
+        if not session.get("logged_in") and not session.get("admin_logged_in"):
+            diag = _auth_diag_info()
+            print(f"[auth-401] cookie={diag['cookie_present']} "
+                  f"sid={diag['logged_in']} adm={diag['admin_logged_in']} "
+                  f"keys={diag['session_keys']} host={diag['host']} "
+                  f"path={diag['path']} build={diag['build']}", flush=True)
             if request.path.startswith("/api/"):
-                return jsonify({"error": "未登录"}), 401
+                return jsonify({"success": False, "message": "未登录", "_diag": diag}), 401
             return redirect(url_for("admin.admin_login_page"))
         return f(*args, **kwargs)
     return decorated
@@ -413,6 +419,28 @@ def _create_chase_check_task(chase, manual=False):
     return None
 
 
+def _tg_search_chase_files(chase):
+    """TG 搜索追更：按追更配置搜索 Telegram 频道文件，返回 (files, err)。"""
+    from .routes_telegram import _svc
+    q = (chase.get("tg_query") or "").strip() or (chase.get("name") or "").strip()
+    channels = chase.get("tg_channels") or []
+    if isinstance(channels, str):
+        channels = [x.strip() for x in channels.split(",") if x.strip()]
+    try:
+        limit = int(chase.get("tg_limit") or 30)
+    except Exception:
+        limit = 30
+    try:
+        res = _svc().search(q, channels, limit)
+        errs = res.get("errors") or []
+        items = res.get("items") or []
+        if not items and errs:
+            return [], "TG 搜索失败: " + "; ".join(errs)[:240]
+        return items, None
+    except Exception as e:
+        return [], "TG 搜索失败: %s" % str(e)[:240]
+
+
 def _run_server_chase_check(chase, manual=False):
     """服务端后台执行追更检查（替代客户端 chase-check 任务）：
     浏览分享 → 格式/大小过滤 → 识别集数 → WPS目录探测 →
@@ -442,8 +470,11 @@ def _run_server_chase_check(chase, manual=False):
         prog = chase.get("progress_ep", 0) or 0
         check_from = base_ep if manual else max(base_ep, prog)
 
-        # ── 1. 服务端浏览分享 ──
-        files, err = _server_browse_chase_share(share_url, share_pwd, sub_path)
+        # ── 1. 获取文件列表：TG 搜索 或 浏览分享 ──
+        if chase.get("tg_search"):
+            files, err = _tg_search_chase_files(chase)
+        else:
+            files, err = _server_browse_chase_share(share_url, share_pwd, sub_path)
         if err:
             logger.info(f"追更检查[{cname}] 分享浏览失败: {err}")
             # 即使分享浏览失败，也探测 WPS 目录校准 wps_eps（WPS 实际文件快照）。
@@ -469,6 +500,18 @@ def _run_server_chase_check(chase, manual=False):
             if len(_big_enough) != len(files):
                 logger.info(f"追更检查[{cname}] 大小过滤: {len(files)} → {len(_big_enough)} 个文件")
             files = _big_enough
+
+        # TG 搜索源：记录文件名 → 消息定位信息，派发时据此生成 tg-download 任务
+        _tg_items = {}
+        if chase.get("tg_search"):
+            for f in files:
+                _nm = f.get("name", "")
+                if _nm and _nm not in _tg_items:
+                    # 用频道文案第一行作为展示名（比 S07E07_4K_00_00... 这种好认）
+                    _cap = (f.get("caption") or "").split("\n")[0].strip()
+                    if _cap:
+                        f["display"] = _cap[:150]
+                    _tg_items[_nm] = f
 
         # ── 3. 识别集数（服务端，与客户端逻辑一致）──
         # 「指定集数」带季（如 S02E01-S02E08）时，分享内可能同时含 S01/S02
@@ -536,7 +579,8 @@ def _run_server_chase_check(chase, manual=False):
             logger.info(f"追更检查[{cname}](电影): 共{len(files)}个文件, 发现{len(movie_files)}个电影文件")
             _submit_server_chase_result(cid, {
                 "episodes": new, "siblings": all_eps,
-                "movie_files": movie_files, "is_movie": True})
+                "movie_files": movie_files, "is_movie": True,
+                "tg_items": _tg_items})
         else:
             new = sorted({int(k) for k in all_eps if _is_ep_number(k, check_from)})
             logger.info(f"追更检查[{cname}]: 共{len(files)}个文件, 发现{len(new)}个新集数: {new[:10]}")
@@ -554,7 +598,8 @@ def _run_server_chase_check(chase, manual=False):
                     logger.info(f"追更检查[{cname}]: 查缺失补档新增 {len(_miss)} 个缺失集"
                                 f"(分享有/WPS无): {_miss_sorted[:10]}，本次派发 {len(new)} 集")
             _submit_server_chase_result(cid, {
-                "episodes": new, "siblings": all_eps, "wps_files": wps_files})
+                "episodes": new, "siblings": all_eps, "wps_files": wps_files,
+                "tg_items": _tg_items})
     except Exception as e:
         logger.info(f"追更检查[{cname}] 异常: {e}")
         try:
@@ -904,7 +949,7 @@ def _trigger_strm_task(t, idx):
                 fid = f.get("id")
                 status["current"] = fname
                 try:
-                    strm_url = f"{strm_base}{url_prefix}/{fid}"
+                    strm_url = f"{strm_base}{url_prefix}/{fid}/{quote(fname)}"
                     fname_fixed = fname.replace("（", "(").replace("）", ")")
                     # 仅过滤 Windows 文件名非法字符，保留 = + : , [tmdbid=xxx] 等元数据符号
                     safe = _safe_name(fname_fixed)
@@ -999,9 +1044,9 @@ def _build_chase_file_info(chase, ep_num, siblings=None, manual=None):
                 pass
     # ② 其次从文件名中提取季别（精确匹配 SxxExx，避免文件名中其他 Sxx 干扰）
     file_name = siblings.get(str(ep_num), "")
-    season_from_file = re.search(r'[Ss](\d{2})E\d+', file_name)
+    season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})E\d+', file_name)
     if not season_from_file:
-        season_from_file = re.search(r'[Ss](\d{2})', file_name)
+        season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})(?![0-9])', file_name)
     if season_from_file:
         season = int(season_from_file.group(1))
     else:
@@ -1114,6 +1159,41 @@ def _create_chase_download_task(chase, ep_num, siblings=None, manual=None, run_a
         manual = {}
     tid = uuid.uuid4().hex[:12]
     fi = _build_chase_file_info(chase, ep_num, siblings, manual)
+    # ── TG 搜索源：派发 tg-download 任务（客户端用下载会话直连下载后上传 WPS）──
+    if chase.get("tg_search"):
+        _it = (chase.get("tg_items") or {}).get(fi["file_name"]) or {}
+        task = {
+            "id": tid,
+            "type": "tg-download",
+            "chase_id": chase["id"],
+            "name": _it.get("display") or fi["name"],
+            "file_name": fi["rename_to"] or fi["file_name"],
+            "src_name": fi["file_name"],
+            "chat_id": _it.get("chat_id") or "",
+            "msg_id": _it.get("msg_id") or "",
+            "channel_title": _it.get("channel_title") or "",
+            "channel_value": _it.get("channel_value") or "",
+            "size_text": _it.get("size_text") or "",
+            "mime": _it.get("mime") or "",
+            "link": _it.get("link") or "",
+            "wps_path": fi["wps_path"],
+            "category": fi["category"],
+            "is_movie": fi["is_movie"],
+            "show_folder": fi["show_folder"],
+            "ep_num": fi["ep_num"],
+            "target_client": chase.get("target_client", ""),
+            "sub_path": chase.get("sub_path", ""),
+            "episodes_filter": chase.get("episodes_filter", ""),
+            "status": "pending",
+            "warn": "",
+            "created_at": time.time(),
+            "run_after": run_after or 0,
+        }
+        _CLIENT_TASKS[tid] = task
+        _CLIENT_QUEUE.append(tid)
+        _save_client_tasks()
+        _record_chase_downloaded_ep(chase["id"], ep_num)
+        return
     task = {
         "id": tid,
         "type": "chase-download",
@@ -1142,6 +1222,7 @@ def _create_chase_download_task(chase, ep_num, siblings=None, manual=None, run_a
     }
     _CLIENT_TASKS[tid] = task
     _CLIENT_QUEUE.append(tid)
+    _save_client_tasks()
     _record_chase_downloaded_ep(chase["id"], ep_num)
 
 
@@ -1154,6 +1235,11 @@ def _create_chase_download_batch_tasks(chase, items, run_after=None):
     单集或跨路径仍创建单集任务，保持原有行为与兼容性。
     """
     groups = []  # [(wps_path, [(ep_num, siblings, manual, fi)])]
+    if chase.get("tg_search"):
+        # TG 源逐集派发 tg-download，不做批量打包（每个文件是独立消息）
+        for ep_num, siblings, manual in items:
+            _create_chase_download_task(chase, ep_num, siblings, manual, run_after)
+        return len(items)
     for ep_num, siblings, manual in items:
         fi = _build_chase_file_info(chase, ep_num, siblings, manual)
         if groups and groups[-1][0] == fi["wps_path"]:
