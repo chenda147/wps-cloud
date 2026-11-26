@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -28,6 +29,14 @@ STATE_UNKNOWN = "unknown"
 
 # 缓存的视频最小体积（判断"已下载"时排除缩略图/小文件）
 _MIN_DONE = 2 * 1048576
+
+# 只认领真正的文件缓存：<dc>_<id> 或 <dc>_<id>.temp
+# 视频流式播放还会生成 <dc>_<id>_64.preload 以及 .parts，这些不是完整文件，必须排除
+_RE_CACHE = re.compile(r"^\d+_\d+(\.temp)?$")
+
+
+def _is_cache_name(name):
+    return bool(_RE_CACHE.match(name or ""))
 
 _SU_CANDIDATES = ("/system/bin/su", "/system/xbin/su", "/debug_ramdisk/su",
                   "/sbin/su", "su")
@@ -334,8 +343,9 @@ def _detect_state(has_badge, files, growing, mapped, expect_bytes=0):
     if has_badge is None:
         return STATE_UNKNOWN, None
     if not has_badge:
-        done = [p for p, s in files.items()
-                if not p.endswith(".temp") and s > _MIN_DONE]
+        done = [p for p in files
+                if _is_cache_name(p) and not p.endswith(".temp")
+                and files[p] > _MIN_DONE]
         if not done:
             return STATE_UNKNOWN, None
         # 有预期大小时优先按体积匹配，避免同一聊天里多个已下载视频认错文件
@@ -407,6 +417,81 @@ def _wait_target(target, log, progress, deadline, cancel=None, expect_bytes=0):
             return None
         prev = size
     return None
+
+
+def _wait_on_tg(target, expect_bytes, shot_path, log, progress, deadline,
+                cancel=None, max_bg_s=240):
+    """留在 Telegram 界面里等这一集真正下完（能直接看到进度环）。
+
+    完成判据（任一）：
+      1) .temp 消失（Telegram 写完才会改名）——最可靠；
+      2) 体积达到预期且连续两次采样不再增长；
+      3) 体积接近预期，且截图里气泡左上角的进度环已经消失。
+
+    返回 (final_name, need_foreground)。need_foreground=True 表示在后台停留
+    时间过长，需要切回本应用继续等（避免被系统冻结）。
+    """
+    final = target[:-5] if target.endswith(".temp") else target
+    started = time.time()
+    prev = 0
+    stable = 0
+    tick = 0
+    badge_gone = False
+    while time.time() < deadline:
+        if cancel is not None and cancel.is_set():
+            log("[本机TG] 已取消")
+            return None, False
+        if time.time() - started > max_bg_s:
+            log("[本机TG] 已在 Telegram 界面等待 %d 秒，切回应用继续等"
+                % int(time.time() - started))
+            return None, True
+        time.sleep(4)
+        tick += 1
+        s_tmp = _stat_one(target) if final != target else None
+        s_fin = _stat_one(final)
+        size = s_tmp if s_tmp is not None else s_fin
+        if size is None:
+            continue
+        if progress and size > prev:
+            progress(size, (size - prev) / 4.0 / 1048576.0)
+        if size == prev:
+            stable += 1
+        else:
+            stable = 0
+        if tick % 4 == 0:  # 约 16 秒：打一条进度 + 看一眼界面
+            log("[本机TG] 已下载 %.2f MB" % (size / 1048576.0))
+            shot = None
+            if _screencap(shot_path):
+                shot = _read_shot(shot_path)
+            if shot:
+                has_badge, _box = _has_badge_and_box(shot)
+                if has_badge is False:
+                    badge_gone = True
+        renamed = (final != target) and s_tmp is None and s_fin is not None
+        if renamed:
+            log("[本机TG] 下载完成（已重命名）：%s（%.2f MB）"
+                % (final, size / 1048576.0))
+            if progress:
+                progress(size, 0)
+            return final, False
+        if expect_bytes > 0:
+            if size >= expect_bytes * 0.97 and (stable >= 2 or badge_gone):
+                log("[本机TG] 下载完成：%s（%.2f MB / 预期 %.0f MB）"
+                    % (final, size / 1048576.0, expect_bytes / 1048576.0))
+                if progress:
+                    progress(size, 0)
+                return final, False
+        elif badge_gone and stable >= 1 and size > _MIN_DONE:
+            log("[本机TG] 下载完成（界面进度环已消失）：%s（%.2f MB）"
+                % (final, size / 1048576.0))
+            if progress:
+                progress(size, 0)
+            return final, False
+        if stable >= 60:  # 约 4 分钟没增长，认为下载已中断
+            log("[本机TG] 下载停滞（当前 %.2f MB），放弃" % (size / 1048576.0))
+            return None, False
+        prev = size
+    return None, False
 
 
 def _load_map(path):
@@ -518,33 +603,27 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
         log("[本机TG] 状态：未下载 → 点击一次下载按钮")
         left, top = box[0], box[1]
         _su("input tap %d %d" % (left + 70, top + 65), timeout=20)
-        log("[本机TG] 已点击 (%d,%d)，切回本应用继续轮询进度"
+        log("[本机TG] 已点击 (%d,%d)，留在 Telegram 界面等它下完"
             % (left + 70, top + 65))
         tapped = True
         break
-
-    # 立刻切回本应用：应用在后台会被系统冻结，导致整个下载/上传流程卡死；
-    # 切回后 Telegram 仍在后台继续下载，我们只通过 su 读缓存文件大小来判断进度
-    _bring_app_front()
-    try:
-        os.remove(shot_path)
-    except Exception:
-        pass
 
     if tapped:
         # 确认点击是否真的触发了下载（10 秒内缓存必须出现新文件或在增长）
         for _ in range(10):
             if cancel is not None and cancel.is_set():
+                _bring_app_front()
                 return None, "已取消"
             time.sleep(1)
             now = _cache_list()
-            new = [p for p in now if p not in files]
+            new = [p for p in now if p not in files and _is_cache_name(p)]
             if new:
                 # 忽略缩略图等小文件，优先认领体积较大的视频缓存
                 big = [p for p in new if now[p] > 1048576]
                 target = max(big or new, key=lambda p: now[p])
                 break
-            grew = [p for p in now if now[p] - files.get(p, 0) > 512 * 1024]
+            grew = [p for p in now
+                    if _is_cache_name(p) and now[p] - files.get(p, 0) > 512 * 1024]
             if grew:
                 target = max(grew, key=lambda p: now[p] - files.get(p, 0))
                 break
@@ -554,6 +633,7 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
             log("[本机TG] 点击后 10 秒内缓存未增长（可能点击未命中）")
 
     if not target:
+        _bring_app_front()
         return None, "未能启动下载（视频未显示或点击无效）"
 
     if mapping.get(key) != target:
@@ -565,10 +645,30 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
             % (target, expect_bytes / 1048576.0))
     else:
         log("[本机TG] 等待下载完成：%s" % target)
-    final = _wait_target(target, log, progress, time.time() + timeout_min * 60,
-                         cancel, expect_bytes)
-    if not final:
+
+    deadline = time.time() + timeout_min * 60
+    # 先在 Telegram 界面里盯着下（能直接看到进度环）；
+    # 但应用在后台可能被系统冻结，所以最多停留 4 分钟就切回本应用继续等
+    final, need_fg = _wait_on_tg(target, expect_bytes, shot_path, log, progress,
+                                 deadline, cancel, max_bg_s=240)
+    if not final and not need_fg:
+        _bring_app_front()
         return None, "等待下载完成超时"
+    if need_fg:
+        _bring_app_front()
+    try:
+        os.remove(shot_path)
+    except Exception:
+        pass
+    if not final:
+        # 已切回前台，改用文件系统继续等（前台不会被冻结）
+        final = _wait_target(target, log, progress, deadline, cancel, expect_bytes)
+    if not final:
+        _bring_app_front()
+        return None, "等待下载完成超时"
+
+    # 回到本应用再复制/上传，避免复制和上传阶段停留在后台
+    _bring_app_front()
 
     src = "%s/%s" % (cdir, final)
     code, out, err = _su("cp -f '%s' '%s' && chmod 666 '%s'" % (src, dest_path, dest_path),
