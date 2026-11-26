@@ -9,7 +9,7 @@ import json
 import time
 
 # 客户端版本号（每次发布更新时递增）。用于服务端识别客户端能力（如支持的云盘类型）。
-CLIENT_VERSION = "1.0.8"
+CLIENT_VERSION = "1.0.9"
 APP_NAME = "WPS传输工具"
 
 
