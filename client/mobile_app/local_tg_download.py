@@ -350,8 +350,13 @@ def _detect_state(has_badge, files, growing, mapped, expect_bytes=0):
     return STATE_NOT_DOWNLOADED, None
 
 
-def _wait_target(target, log, progress, deadline, cancel=None):
-    """轮询缓存文件直到写完（.temp 消失），返回最终文件名或 None。"""
+def _wait_target(target, log, progress, deadline, cancel=None, expect_bytes=0):
+    """轮询缓存文件直到真正下完，返回最终文件名或 None。
+
+    不能只看"文件出现"就认为完成：Telegram 可能边下边写同一个文件名，
+    也可能先生成缩略图。这里以「体积达到预期 + 不再增长」为准，
+    只有 .temp 被改成正式文件名（Telegram 写完才改名）才可直接判定完成。
+    """
     final = target[:-5] if target.endswith(".temp") else target
     prev = 0
     stable = 0
@@ -363,28 +368,43 @@ def _wait_target(target, log, progress, deadline, cancel=None):
             return None
         time.sleep(3)
         tick += 1
-        size = _stat_one(final)
-        if size is not None and size > 0:
-            log("[本机TG] 下载完成：%s（%.2f MB）" % (final, size / 1048576.0))
-            if progress:
-                progress(size, 0)
-            return final
-        size = _stat_one(target)
+        s_tmp = _stat_one(target) if final != target else None
+        s_fin = _stat_one(final)
+        size = s_tmp if s_tmp is not None else s_fin
+        now = time.time()
         if size is None:
             continue
-        now = time.time()
         if progress and size > prev:
             progress(size, (size - prev) / max(now - last_t, 0.1) / 1048576.0)
         last_t = now
         if size == prev:
             stable += 1
-            if stable >= 60:  # 约 3 分钟无增长，认为下载已中断
-                log("[本机TG] 下载停滞超过 3 分钟，放弃")
-                return None
         else:
             stable = 0
             if tick % 5 == 0:
                 log("[本机TG] 已下载 %.2f MB" % (size / 1048576.0))
+
+        # .temp 消失 = Telegram 已把文件写完改名
+        renamed = (final != target) and s_tmp is None and s_fin is not None
+        if expect_bytes > 0:
+            need = 0.90 if renamed else 0.97
+            if size >= expect_bytes * need and (renamed or stable >= 2):
+                log("[本机TG] 下载完成：%s（%.2f MB / 预期 %.0f MB）"
+                    % (final, size / 1048576.0, expect_bytes / 1048576.0))
+                if progress:
+                    progress(size, 0)
+                return final
+        else:
+            if renamed or (size > _MIN_DONE and stable >= 2):
+                log("[本机TG] 下载完成：%s（%.2f MB）" % (final, size / 1048576.0))
+                if progress:
+                    progress(size, 0)
+                return final
+
+        if stable >= 60:  # 约 3 分钟没增长，认为下载已中断
+            log("[本机TG] 下载停滞超过 3 分钟（当前 %.2f MB），放弃"
+                % (size / 1048576.0))
+            return None
         prev = size
     return None
 
@@ -520,7 +540,9 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
             now = _cache_list()
             new = [p for p in now if p not in files]
             if new:
-                target = max(new, key=lambda p: now[p])
+                # 忽略缩略图等小文件，优先认领体积较大的视频缓存
+                big = [p for p in new if now[p] > 1048576]
+                target = max(big or new, key=lambda p: now[p])
                 break
             grew = [p for p in now if now[p] - files.get(p, 0) > 512 * 1024]
             if grew:
@@ -538,7 +560,13 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
         mapping[key] = target
         _save_map(mpath, mapping)
 
-    final = _wait_target(target, log, progress, time.time() + timeout_min * 60, cancel)
+    if expect_bytes:
+        log("[本机TG] 等待下载完成：%s（预期 %.0f MB）"
+            % (target, expect_bytes / 1048576.0))
+    else:
+        log("[本机TG] 等待下载完成：%s" % target)
+    final = _wait_target(target, log, progress, time.time() + timeout_min * 60,
+                         cancel, expect_bytes)
     if not final:
         return None, "等待下载完成超时"
 
@@ -548,10 +576,14 @@ def download(channel, msg_id, dest_path, log=print, progress=None, cancel=None,
     if code != 0:
         return None, "复制文件失败：%s" % (err or out or "cp error")[:200]
     try:
-        if os.path.getsize(dest_path) <= 0:
-            return None, "复制后文件为空"
+        got = os.path.getsize(dest_path)
     except Exception:
         return None, "复制后文件不存在"
+    if got <= 0:
+        return None, "复制后文件为空"
+    if expect_bytes and got < expect_bytes * 0.85:
+        return None, "下载文件不完整（%.2f MB / 预期 %.0f MB）" % (
+            got / 1048576.0, expect_bytes / 1048576.0)
 
     log("[本机TG] 已保存：%s（%.2f MB）"
         % (dest_path, os.path.getsize(dest_path) / 1048576.0))
