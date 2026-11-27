@@ -121,6 +121,26 @@ def _clean(text):
     return _ANSI.sub("", text).replace("\x08", "")
 
 
+# ── 登录诊断日志 ─────────────────────────────────────────────
+# 手机端 tdl 登录依赖伪终端，一旦闪退很难看到原因：把每一步同时写进应用私有目录
+# 和 /sdcard/Download（后者可用文件管理器取出、发给开发者）。
+_LOG_FILES = (os.path.join(BASE_DIR, "tg_login.log"),
+              "/sdcard/Download/wpstransfer_tg.log")
+
+
+def log_step(msg):
+    """记录登录流程的每一步；任何写入失败都静默忽略，绝不抛异常。"""
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg) + "\n"
+    for p in _LOG_FILES:
+        try:
+            if os.path.exists(p) and os.path.getsize(p) > 512 * 1024:
+                os.remove(p)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
+
 class TgTdl:
     """tdl 封装：登录态检查 / 手机号验证码登录 / 下载（含续传与进度解析）。"""
 
@@ -128,6 +148,7 @@ class TgTdl:
         self.tdl = find_tdl()
         if not self.tdl:
             raise TdlError("未找到 tdl 可执行文件（应打包在 APK 的 tools/tdl）")
+        log_step("find_tdl: %s" % self.tdl)
         self.log = log_cb or (lambda m: None)
         self.proxy = _normalize_proxy(proxy, self.log)
         try:
@@ -418,22 +439,36 @@ class TgCodeLogin:
             pass
 
     def start(self):
+        log_step("openpty: 开始创建伪终端")
         try:
             master, slave = os.openpty()
         except Exception as e:
+            log_step("openpty 失败: %r" % (e,))
             raise TdlError("当前设备不支持伪终端（openpty 失败）：%s" % e)
+        log_step("openpty 成功: master=%s slave=%s" % (master, slave))
         try:
             import fcntl
             import struct
             import termios
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
-        except Exception:
-            pass
+            log_step("ioctl TIOCSWINSZ 成功")
+        except Exception as e:
+            log_step("ioctl 跳过: %r" % (e,))
         args = [self.dl.tdl, "login", "-T", "code"] + self.dl._base_args()
+        log_step("启动子进程: %s" % " ".join(args))
         try:
             self._proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave,
                                           env=self.dl._env(), cwd=self.dl.home,
                                           close_fds=True)
+            log_step("子进程已启动 pid=%s" % getattr(self._proc, "pid", "?"))
+        except Exception as e:
+            log_step("子进程启动失败: %r" % (e,))
+            try:
+                os.close(master)
+                os.close(slave)
+            except Exception:
+                pass
+            raise
         finally:
             try:
                 os.close(slave)
@@ -452,11 +487,14 @@ class TgCodeLogin:
             return
         try:
             os.write(self._master, (str(text).strip() + "\r").encode("utf-8"))
+            log_step("send: 已写入用户输入（%d 字符）" % len(str(text).strip()))
         except Exception as e:
             self._emit("log", "写入失败：%s" % e)
+            log_step("send 失败: %r" % (e,))
 
     def close(self):
         self._closed = True
+        log_step("close: 终止登录流程")
         p = self._proc
         try:
             if p is not None and p.poll() is None:
@@ -472,6 +510,7 @@ class TgCodeLogin:
 
     def _reader(self):
         import select
+        log_step("reader 线程开始")
         last_log = 0.0
         while not self._closed:
             try:
@@ -509,9 +548,11 @@ class TgCodeLogin:
         ok = False
         try:
             ok = self.dl.is_logged_in(use_cache=False)
-        except Exception:
+        except Exception as e:
+            log_step("is_logged_in 异常: %r" % (e,))
             ok = False
         msg = "" if ok else self._diagnose()
+        log_step("登录流程结束: ok=%s msg=%s" % (ok, msg[:120]))
         self._emit("done", ok, msg)
 
     def _scan(self):
@@ -522,6 +563,7 @@ class TgCodeLogin:
             if key in up:
                 self._latch = None
                 self._emit("error", friendly)
+                log_step("识别到 TG 错误: %s" % key)
         # survey 会把旧提示残留在回显里，取“位置最靠后（最新出现）”的提示为准
         candidates = (
             ("phone", seg.rfind("enter your phone number")),
@@ -540,6 +582,7 @@ class TgCodeLogin:
                 detected = name
         if detected and detected != self._latch:
             self._latch = detected
+            log_step("检测到交互提示: %s" % detected)
             self._emit("prompt", detected)
         self._new = self._new[-300:]
 

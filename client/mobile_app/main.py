@@ -203,12 +203,43 @@ class SettingsPage(BoxLayout):
         self.clash_api_input = self._row('Clash API 地址', cfg.get('tg_clash_api', '127.0.0.1:9090'))
         self.clash_secret_input = self._row('Clash API Secret（可空）', cfg.get('tg_clash_secret', ''))
         self.clash_group_input = self._row('节点分组名（可空=自动识别）', cfg.get('tg_clash_group', ''))
-        tg_login_btn = Button(text='TG 登录（手机号 + 验证码）', size_hint_y=None, height=dp(46),
-                              background_color=(0.18, 0.42, 0.68, 1), color=(1, 1, 1, 1))
-        tg_login_btn.bind(on_release=lambda *a: self.app.open_tg_login())
-        self.body.add_widget(tg_login_btn)
-        tg_tip = Label(text='首次使用需登录：填手机号 → 发送验证码 → 填入 Telegram 收到的码 → 登录。'
-                             '账号开启两步验证时再填密码。登录态保存在应用私有目录，只需登录一次。',
+        # TG 登录直接内联在连接页（不用弹窗，减少出错环节）：
+        # 填手机号 → 发送验证码 → 填验证码 → 登录；账号开了两步验证再填密码。
+        self.tg_phone_input = TextInput(text=cfg.get('tg_phone', ''), multiline=False,
+                                        hint_text='手机号（含国家码，如 +8613800000000）',
+                                        size_hint_y=None, height=dp(44), font_size='14sp')
+        self.body.add_widget(self.tg_phone_input)
+
+        tg_btn_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        tg_send_btn = Button(text='发送验证码', background_color=(0.18, 0.42, 0.68, 1),
+                             color=(1, 1, 1, 1))
+        # 注意：按钮回调里只做转发，所有耗时/子进程操作都在 App 的后台线程里做
+        tg_send_btn.bind(on_release=lambda *a: self.app.tg_login_start())
+        tg_ok_btn = Button(text='登录', background_color=(0.12, 0.62, 0.34, 1),
+                           color=(1, 1, 1, 1))
+        tg_ok_btn.bind(on_release=lambda *a: self.app.tg_login_submit())
+        tg_btn_row.add_widget(tg_send_btn)
+        tg_btn_row.add_widget(tg_ok_btn)
+        self.body.add_widget(tg_btn_row)
+
+        self.tg_code_input = TextInput(multiline=False, hint_text='验证码', input_type='number',
+                                       size_hint_y=None, height=dp(44), font_size='14sp')
+        self.tg_pwd_input = TextInput(multiline=False, password=True,
+                                      hint_text='两步验证密码（账号开启 2FA 时才需要）',
+                                      size_hint_y=None, height=dp(44), font_size='14sp')
+        self.body.add_widget(self.tg_code_input)
+        self.body.add_widget(self.tg_pwd_input)
+
+        self.tg_status = Label(
+            text='未登录：填手机号 → 点「发送验证码」→ 收到码后填入 → 点「登录」',
+            font_size='12sp', color=(0.72, 0.79, 0.86, 1), halign='left', valign='top',
+            size_hint_y=None, height=dp(46))
+        self.tg_status.bind(width=lambda *a: setattr(self.tg_status, 'text_size',
+                                                     (self.tg_status.width, None)))
+        self.body.add_widget(self.tg_status)
+
+        tg_tip = Label(text='登录态保存在应用私有目录，只需登录一次；若点击后闪退，'
+                             '请把 /sdcard/Download/wpstransfer_tg.log 发给开发者定位。',
                        font_size='11sp', color=(0.52, 0.55, 0.59, 1), halign='left', valign='top',
                        size_hint_y=None)
         tg_tip.bind(width=lambda *a: setattr(tg_tip, 'text_size', (tg_tip.width, None)))
@@ -245,6 +276,11 @@ class SettingsPage(BoxLayout):
             if c.get('type') == ctype:
                 return c.get(key, '')
         return ''
+
+    def set_tg_status(self, text, err=False):
+        """更新 TG 登录状态文字（只能在 UI 线程调用）。"""
+        self.tg_status.text = text
+        self.tg_status.color = (1, 0.45, 0.36, 1) if err else (0.72, 0.79, 0.86, 1)
 
     def _row(self, title, default='', multiline=False):
         lbl = Label(text=title, font_size='13sp', color=(0.8, 0.85, 0.9, 1),
@@ -422,66 +458,15 @@ class LogsPage(BoxLayout):
             self.log_text.text = '\n'.join(lines[-300:])
 
 
-class TgLoginPopup(Popup):
-    """Telegram 登录弹窗：手机号 + 验证码（与 PC 客户端一致）。
-
-    后台用伪终端跑 tdl login -T code，界面把手机号 / 验证码 / 两步验证密码写回。
-    """
-
-    def __init__(self, app_ref, **kw):
-        super().__init__(title='Telegram 登录（手机号 + 验证码）',
-                         size_hint=(0.94, 0.88), **kw)
-        self.app = app_ref
-        cfg = load_config()
-        box = BoxLayout(orientation='vertical', spacing=dp(8), padding=dp(12))
-
-        self.status = Label(
-            text='填手机号 → 点「发送验证码」→ 收到码后填入 → 点「登录」',
-            size_hint_y=None, height=dp(62), font_size='13sp',
-            color=(0.85, 0.9, 0.95, 1), halign='left', valign='middle')
-        self.status.bind(size=lambda w, v: setattr(w, 'text_size', (w.width, None)))
-
-        self.phone = TextInput(text=cfg.get('tg_phone', ''), multiline=False,
-                               hint_text='手机号（含国家码，如 +8613800000000）',
-                               size_hint_y=None, height=dp(44), font_size='14sp')
-        self.code = TextInput(multiline=False, hint_text='验证码', input_type='number',
-                              size_hint_y=None, height=dp(44), font_size='14sp')
-        self.pwd = TextInput(multiline=False, password=True,
-                             hint_text='两步验证密码（账号开启 2FA 时才需要）',
-                             size_hint_y=None, height=dp(44), font_size='14sp')
-
-        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        send_btn = Button(text='发送验证码', background_color=(0.18, 0.42, 0.68, 1),
-                          color=(1, 1, 1, 1))
-        send_btn.bind(on_release=lambda *a: self.app.tg_login_start(
-            self.phone.text.strip(), self))
-        login_btn = Button(text='登录', background_color=(0.12, 0.62, 0.34, 1),
-                           color=(1, 1, 1, 1))
-        login_btn.bind(on_release=lambda *a: self.app.tg_login_submit(
-            self.code.text.strip(), self.pwd.text.strip(), self))
-        row.add_widget(send_btn)
-        row.add_widget(login_btn)
-
-        close = Button(text='关闭', size_hint_y=None, height=dp(44))
-        close.bind(on_release=lambda *a: self.dismiss())
-
-        box.add_widget(self.status)
-        box.add_widget(self.phone)
-        box.add_widget(self.code)
-        box.add_widget(self.pwd)
-        box.add_widget(row)
-        box.add_widget(close)
-        self.content = box
-
-    def set_state(self, text):
-        self.status.text = text
-
-
 class WpsTransferApp(App):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.worker = None
         self.connected = False
+        # TG 登录状态（连接页内联操作）
+        self._tg_login_stage = 'idle'
+        self._tg_login_cl = None
+        self._tg_login_phone = ''
 
     def build(self):
         self.title = 'WPS传输工具'
@@ -569,15 +554,10 @@ class WpsTransferApp(App):
         if was:
             Clock.schedule_once(lambda dt: self._start_worker(), 0.5)
 
-    # ── Telegram 登录（手机号 + 验证码，与 PC 一致）──
+    # ── Telegram 登录（手机号 + 验证码，直接在「连接」页操作，不用弹窗）──
 
-    def open_tg_login(self):
-        popup = TgLoginPopup(self)
-        self._tg_login_stage = 'idle'
-        self._tg_login_cl = None
-        self._tg_login_phone = ''
-        popup.bind(on_dismiss=lambda *a: self._tg_login_stop())
-        popup.open()
+    def _tg_status_ui(self, text, err=False):
+        Clock.schedule_once(lambda dt: self.settings_page.set_tg_status(text, err))
 
     def _tg_login_stop(self):
         cl = getattr(self, '_tg_login_cl', None)
@@ -588,10 +568,12 @@ class WpsTransferApp(App):
                 pass
         self._tg_login_cl = None
 
-    def tg_login_start(self, phone, popup):
-        """点“发送验证码”：启动 tdl login -T code，并把手机号写给它。"""
+    def tg_login_start(self):
+        """点「发送验证码」：后台启动 tdl login -T code，出现手机号提示时自动填回。"""
+        sp = self.settings_page
+        phone = (sp.tg_phone_input.text or '').strip()
         if not phone:
-            popup.set_state('请输入手机号（含国家码，如 +8613800000000）')
+            sp.set_tg_status('请输入手机号（含国家码，如 +8613800000000）', True)
             return
         if getattr(self, '_tg_login_stage', 'idle') in ('starting', 'sending_code', 'verifying'):
             return
@@ -604,60 +586,68 @@ class WpsTransferApp(App):
         self._tg_login_stop()
         self._tg_login_phone = phone
         self._tg_login_stage = 'starting'
-        popup.set_state('正在连接 Telegram…')
+        sp.set_tg_status('正在启动 tdl 登录…')
 
         def _run():
+            import mobile_tg_tdl as mtdl
             try:
-                from mobile_tg_tdl import TgTdl, TgCodeLogin
-                dl = TgTdl(proxy=(cfg.get('tg_proxy') or '').strip(),
-                           threads=cfg.get('tdl_threads') or 16,
-                           pool=cfg.get('tdl_pool') or 16,
-                           log_cb=self.log)
+                mtdl.log_step('点击发送验证码：开始登录流程')
+                dl = mtdl.TgTdl(proxy=(cfg.get('tg_proxy') or '').strip(),
+                                threads=cfg.get('tdl_threads') or 16,
+                                pool=cfg.get('tdl_pool') or 16,
+                                log_cb=self.log)
+                mtdl.log_step('TgTdl 初始化完成')
                 if dl.is_logged_in(use_cache=True):
                     self._tg_login_stage = 'done'
-                    Clock.schedule_once(lambda dt: popup.set_state('当前已登录，无需再次登录'))
+                    self._tg_status_ui('当前已登录，无需再次登录')
                     return
-                cl = TgCodeLogin(dl, lambda *ev: Clock.schedule_once(
-                    lambda dt: self._on_tg_login_event(ev, popup)))
+                cl = mtdl.TgCodeLogin(dl, lambda *ev: Clock.schedule_once(
+                    lambda dt: self._on_tg_login_event(ev)))
                 self._tg_login_cl = cl
                 cl.start()
+                mtdl.log_step('tdl login 已启动，等待手机号提示')
             except Exception as e:
+                mtdl.log_step('登录启动异常: %r' % (e,))
                 self._tg_login_stage = 'failed'
-                Clock.schedule_once(lambda dt: popup.set_state(f'登录启动失败：{e}'))
+                self._tg_status_ui('登录启动失败：%s' % (e,), True)
 
         threading.Thread(target=_run, daemon=True, name='tg-login').start()
 
-    def tg_login_submit(self, code, pwd, popup):
-        """点“登录”：按当前阶段把验证码或两步验证密码写回 tdl。"""
+    def tg_login_submit(self):
+        """点「登录」：按当前阶段把验证码或两步验证密码写回 tdl。"""
+        sp = self.settings_page
+        code = (sp.tg_code_input.text or '').strip()
+        pwd = (sp.tg_pwd_input.text or '').strip()
         cl = getattr(self, '_tg_login_cl', None)
         if cl is None:
-            popup.set_state('请先点「发送验证码」')
+            sp.set_tg_status('请先点「发送验证码」', True)
             return
         stage = getattr(self, '_tg_login_stage', 'idle')
         if stage == 'want_pass':
             if not pwd:
-                popup.set_state('账号开启了两步验证，请输入密码')
+                sp.set_tg_status('账号开启了两步验证，请输入密码', True)
                 return
             cl.send(pwd)
             self._tg_login_stage = 'verifying'
-            popup.set_state('正在验证两步验证密码…')
+            sp.set_tg_status('正在验证两步验证密码…')
         elif stage in ('want_code', 'sending_code', 'verifying'):
             if not code:
-                popup.set_state('请输入验证码')
+                sp.set_tg_status('请输入验证码', True)
                 return
             cl.send(code)
             self._tg_login_stage = 'verifying'
-            popup.set_state('正在登录…')
+            sp.set_tg_status('正在登录…')
         elif stage == 'want_phone':
             phone = getattr(self, '_tg_login_phone', '')
             if phone:
                 cl.send(phone)
                 self._tg_login_stage = 'sending_code'
-                popup.set_state('已提交手机号，正在发送验证码…')
+                sp.set_tg_status('已提交手机号，正在发送验证码…')
         else:
-            popup.set_state('请先点「发送验证码」')
+            sp.set_tg_status('请先点「发送验证码」', True)
 
-    def _on_tg_login_event(self, ev, popup):
+    def _on_tg_login_event(self, ev):
+        sp = self.settings_page
         kind = ev[0] if ev else ''
         if kind == 'prompt':
             p = ev[1]
@@ -668,21 +658,21 @@ class WpsTransferApp(App):
                 if phone and cl is not None:
                     cl.send(phone)
                     self._tg_login_stage = 'sending_code'
-                    popup.set_state('已提交手机号，正在发送验证码…')
+                    sp.set_tg_status('已提交手机号，正在发送验证码…')
                 else:
-                    popup.set_state('请输入手机号')
+                    sp.set_tg_status('请输入手机号')
             elif p == 'code':
                 self._tg_login_stage = 'want_code'
-                popup.set_state('验证码已发送，请在 Telegram 查收后填入，再点「登录」')
+                sp.set_tg_status('验证码已发送，请在 Telegram 查收后填入，再点「登录」')
             elif p == 'password':
                 self._tg_login_stage = 'want_pass'
-                popup.set_state('账号开启了两步验证，请输入密码后点「登录」')
+                sp.set_tg_status('账号开启了两步验证，请填密码后点「登录」')
         elif kind == 'error':
-            popup.set_state(ev[1])
+            sp.set_tg_status(str(ev[1]), True)
         elif kind == 'done':
             ok, msg = ev[1], ev[2]
             self._tg_login_stage = 'done' if ok else 'failed'
-            popup.set_state('登录成功' if ok else ('登录失败：' + (msg or '请重试')))
+            sp.set_tg_status('登录成功，可以开始使用了' if ok else ('登录失败：' + (msg or '请重试')), not ok)
 
     def on_stop(self):
         self._stop_worker()
