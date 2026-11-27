@@ -189,10 +189,22 @@ def api_client_poll():
     # ── pending 无人认领超时：超过 10 分钟仍无客户端 poll 领取的任务视为死任务，
     # 直接标记失败并从队列移除，避免 active 状态永久占用导致「立即运行/检查更新」
     # 按钮长期置灰、新任务排不进去 ──
+    # ★ 仅当没有"能领取该任务"的在线客户端时才清理：客户端在线、只是下载槽被
+    # 占满（如 4K 单集 3.9GB 下载超过 10 分钟）时，队列中后续集只是正常排队，
+    # 不能判死。此前该逻辑把 E04~E10 全部误清成 failed，导致本集上传后
+    # 队列已空、不再下载下一集。
+    _online_clients = set()
+    for _cn, _ci in _CLIENT_REGISTRY.items():
+        if now - (_ci.get("_last_ts") or 0) <= 300:
+            _online_clients.add(_cn)
     for tid in list(_CLIENT_QUEUE):
         task = _CLIENT_TASKS.get(tid)
         if task and task.get("status") == "pending":
             if now - (task.get("created_at") or 0) > 600:
+                _tgt = task.get("target_client", "")
+                _has_runner = (_tgt in _online_clients) if _tgt else bool(_online_clients)
+                if _has_runner:
+                    continue
                 task["status"] = "failed"
                 task["result_msg"] = "任务排队超时无人执行，已自动清理（客户端可能离线）"
                 task["finished_at"] = time.time()
