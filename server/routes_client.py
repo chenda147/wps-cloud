@@ -197,6 +197,9 @@ def api_client_poll():
     for _cn, _ci in _CLIENT_REGISTRY.items():
         if now - (_ci.get("_last_ts") or 0) <= 300:
             _online_clients.add(_cn)
+    # 当前正在 poll 的客户端本身就是在线证据（重启后 registry 可能为空）
+    if client_name:
+        _online_clients.add(client_name)
     for tid in list(_CLIENT_QUEUE):
         task = _CLIENT_TASKS.get(tid)
         if task and task.get("status") == "pending":
@@ -406,20 +409,45 @@ def api_client_poll():
             active_now = _client_active_count(client_name, exclude_tg_upload=True)
             client_max = _CLIENT_REGISTRY.get(client_name, {}).get("max_concurrent", 3)
             max_available = min(batch, max(client_max - active_now, 0))
+            # ★ 客户端刚刚上报过"槽位已满"：冷却期内一个都不派发。
+            # 否则每轮 poll 都会推队列里的下一个 pending 任务，客户端再跳过，
+            # 形成"E05→E06→E07…逐个推送、逐个跳过"的日志刷屏。
+            if now < _CLIENT_BUSY_UNTIL.get(client_name, 0):
+                max_available = 0
         # ── 分配任务：只分配匹配本客户端名的任务（锁内二次校验 status，杜绝并发重复下发） ──
         assigned = []
         remaining = matched_tasks
+        # ★ 客户端 TG 流水线容量 = 2（1 个下载 + 1 个上传）。它当前已有 2 个
+        # tg-download 在跑（例如第 3 集下载完在上传、补发的重复任务在排队等上传槽）
+        # 时，再派 TG 任务只会被客户端"无空闲槽位"跳过，所以直接不派，
+        # 从源头杜绝"E05→E06→E07…逐个推送、逐个跳过"的日志刷屏。
+        _tg_running = 0
+        if client_name:
+            for _tid0 in list(_CLIENT_QUEUE):
+                _t0 = _CLIENT_TASKS.get(_tid0)
+                if (_t0 and _t0.get("status") == "running"
+                        and _t0.get("polled_by") == client_name
+                        and _t0.get("type") == "tg-download"):
+                    _tg_running += 1
         for tid in remaining:
             if len(assigned) >= max_available:
                 break
             task = _CLIENT_TASKS.get(tid)
-            if task and task.get("status") == "pending":
-                task["status"] = "running"
-                task["polled_at"] = now
-                task["polled_by"] = client_name
-                assigned.append(task)
-                if client_name:
-                    _CLIENT_ACTIVE[client_name] = _CLIENT_ACTIVE.get(client_name, 0) + 1
+            if not (task and task.get("status") == "pending"):
+                continue
+            if (client_name and task.get("type") == "tg-download"
+                    and _tg_running + sum(1 for _a in assigned
+                                          if _a.get("type") == "tg-download") >= 2):
+                continue
+            task["status"] = "running"
+            task["polled_at"] = now
+            task["polled_by"] = client_name
+            assigned.append(task)
+            if client_name:
+                _CLIENT_ACTIVE[client_name] = _CLIENT_ACTIVE.get(client_name, 0) + 1
+        # 客户端成功接走任务：说明它有空槽，清空连续跳过计数
+        if client_name and assigned:
+            _CLIENT_SKIP_COUNT[client_name] = 0
     result = {"tasks": assigned, "cancels": cancel_list, "resumes": resume_list, "task": None}
     # 兼容旧版客户端：单任务模式
     if len(assigned) == 1 and not cancel_list:
@@ -471,6 +499,13 @@ def api_client_task_status():
             _CLIENT_TASKS[tid]["polled_by"] = ""
             _CLIENT_TASKS[tid]["skip_until"] = time.time() + 60
             _CLIENT_TASKS[tid]["result_msg"] = (msg or "槽位满跳过") + "（60秒冷却）"
+            # 同时给该客户端一个客户端级"忙"冷却（指数退避，30s→60s→…→5min）：
+            # 期间不再往它推任何任务，避免它满槽时服务端沿队列逐个推送、
+            # 每 5 秒刷一条"无空闲槽位"。客户端一旦重新接走任务，计数清零。
+            if client_name:
+                _n = _CLIENT_SKIP_COUNT.get(client_name, 0) + 1
+                _CLIENT_SKIP_COUNT[client_name] = _n
+                _CLIENT_BUSY_UNTIL[client_name] = time.time() + min(30 * (2 ** (_n - 1)), 300)
             if client_name and _CLIENT_ACTIVE.get(client_name, 0) > 0:
                 _CLIENT_ACTIVE[client_name] -= 1
             return jsonify({"success": True, "ignored": "cooldown"})

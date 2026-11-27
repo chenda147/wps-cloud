@@ -45,7 +45,7 @@ AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".ape"}
 
 # 构建标记：每次修复“掉登录”问题时递增。用户在登录页 / 401 提示里看到这串，
 # 即可确认当前运行的是否为最新代码（避免改了代码但镜像没重建的假象）。
-SERVER_BUILD = "20261127-queuefix"
+SERVER_BUILD = "20261127-nospam2"
 
 # 挂载根目录缓存 {storage_id: real_folder_id}
 _mount_root_cache = {}
@@ -126,6 +126,13 @@ _RESUME_REQUESTS = {}  # client_name -> set(chase_id)（重新运行追更时下
 _CANCELED_EPS = {}     # chase_id -> {ep: ts}：记录"最近被取消"的集，60秒内漏集补建/失败重试时排除，防止停止后重新运行时"取消→补建→再取消"刷屏
 _CHASE_RESUME_COOLDOWN = {}  # chase_id -> 截止ts：停止后重新运行时60秒内不派发任务，等客户端取消窗口自然过期，防止旧客户端(不处理恢复信号)取消状态残留导致新任务被取消刷屏
 _CLIENT_ACTIVE = {}    # client_name -> 当前活跃任务数
+# client_name -> 截止ts：客户端上报"槽位已满"后的客户端级冷却截止时间。
+# 冷却期内服务端不再派发任何新任务——否则每轮 poll 都会把队列里的下一个
+# pending 任务继续推给满槽客户端（派发→跳过→换下一个→再跳过），日志刷屏。
+_CLIENT_BUSY_UNTIL = {}
+# client_name -> 连续上报"槽位已满"的次数：用于客户端级冷却指数退避
+# （30s→60s→120s…最多 5 分钟），避免满槽客户端被服务端持续推送刷屏。
+_CLIENT_SKIP_COUNT = {}
 # 任务派发临界区互斥锁：多客户端并发轮询（Flask threaded=True）时，
 # 防止两台客户端同时读到同一 pending 任务并重复下发（任务下发重叠）。
 _CLIENT_DISPATCH_LOCK = threading.Lock()
@@ -145,7 +152,7 @@ __all__ = [
     "_update_task", "_cleanup_old_tasks",
     "_CLIENT_TASKS", "_CLIENT_QUEUE", "_CLIENT_REGISTRY", "_chase_batch_pending",
     "_chase_batch_lock", "_CHASE_FILE_LOCK", "_PREVIEW_RESULTS", "_PREVIEW_LOCK", "_CANCEL_REQUESTS", "_RESUME_REQUESTS", "_CANCELED_EPS", "_CHASE_RESUME_COOLDOWN",
-    "_CLIENT_ACTIVE", "_CLIENT_DISPATCH_LOCK", "_stream_cache", "_QUARK_CLIENTS", "_YIDONG_CLIENTS",
+    "_CLIENT_ACTIVE", "_CLIENT_BUSY_UNTIL", "_CLIENT_SKIP_COUNT", "_CLIENT_DISPATCH_LOCK", "_stream_cache", "_QUARK_CLIENTS", "_YIDONG_CLIENTS",
     "scheduler_lock", "_scheduler_state", "_trigger_lock", "_trigger_state",
     "_load_chase", "_save_chase", "_load_strm_tasks", "_save_strm_tasks",
     "CLIENT_TASKS_FILE", "_save_client_tasks", "_load_client_tasks", "_CLIENT_TASKS_LOCK",

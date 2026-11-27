@@ -213,6 +213,13 @@ def run_server():
             print(f"[cleanup] 已清理 {n} 个过期临时文件")
     except Exception:
         pass
+    # 恢复重启前未完成的客户端任务队列：否则服务端一重启，正在排队/下载的
+    # 追更任务全部丢失（客户端还在跑，但队列空了 → 不再有下一集）。
+    try:
+        from .state import _load_client_tasks
+        _load_client_tasks()
+    except Exception:
+        pass
     threading.Thread(target=_unified_scheduler, daemon=True).start()
     from .tunnel_client import start_tunnel_if_configured
     start_tunnel_if_configured(cfg)
