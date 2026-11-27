@@ -460,6 +460,12 @@ class TgCodeLogin:
         ("AUTH_TOKEN_EXPIRED", "登录令牌过期，请重试"),
     ]
 
+    # survey 每个输入提示前都会发 DSR（ESC[6n）查询光标位置，然后阻塞等终端回应。
+    # PC 用 ConPTY（真终端）会自动回应；Android 的裸 pty 后面没有终端模拟器，
+    # 不回应就会永久卡住——提示已显示、输入也写进去了，但 tdl 根本没在读。
+    _DSR = "\x1b[6n"
+    _DSR_REPLY = b"\x1b[40;100R"
+
     def __init__(self, dl, on_event):
         self.dl = dl
         self.on_event = on_event
@@ -470,6 +476,7 @@ class TgCodeLogin:
         self._new = ""
         self._closed = False
         self._latch = None
+        self._raw_tail = ""
 
     def _emit(self, *ev):
         try:
@@ -547,6 +554,23 @@ class TgCodeLogin:
             pass
         self._master = None
 
+    def _answer_dsr(self, txt):
+        """替“终端”回应光标查询，否则 survey 会一直阻塞等这个回复。"""
+        if self._master is None:
+            return
+        scan = self._raw_tail + txt
+        n = scan.count(self._DSR)
+        if n:
+            for _ in range(n):
+                try:
+                    os.write(self._master, self._DSR_REPLY)
+                except Exception:
+                    return
+            log_step("应答光标查询 DSR x%d" % n)
+            scan = scan.replace(self._DSR, "")
+        # 只留尾部几个字符，兼容查询序列被拆到两次 read 的情况
+        self._raw_tail = scan[-8:]
+
     def _reader(self):
         import select
         log_step("reader 线程开始")
@@ -565,6 +589,7 @@ class TgCodeLogin:
                     txt = data.decode("utf-8", "replace")
                     self._buf += txt
                     self._new += txt
+                    self._answer_dsr(txt)
                     self._scan()
                     now = time.time()
                     if now - last_log > 0.6:
