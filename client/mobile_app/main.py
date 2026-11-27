@@ -206,7 +206,7 @@ class SettingsPage(BoxLayout):
         # TG 登录直接内联在连接页（不用弹窗，减少出错环节）：
         # 填手机号 → 发送验证码 → 填验证码 → 登录；账号开了两步验证再填密码。
         self.tg_phone_input = TextInput(text=cfg.get('tg_phone', ''), multiline=False,
-                                        hint_text='手机号（含国家码，如 +8613800000000）',
+                                        hint_text='手机号（国内填 11 位，自动补 +86）',
                                         size_hint_y=None, height=dp(44), font_size='14sp')
         self.body.add_widget(self.tg_phone_input)
 
@@ -572,8 +572,23 @@ class WpsTransferApp(App):
         """点「发送验证码」：后台启动 tdl login -T code，出现手机号提示时自动填回。"""
         sp = self.settings_page
         phone = (sp.tg_phone_input.text or '').strip()
+        # 手机号规范化：允许只填 11 位（自动补 +86），也允许带空格/横线；
+        # 国外号码请以 + 开头。
+        _digits = "".join(ch for ch in phone if ch.isdigit())
+        if phone.startswith("+") and _digits:
+            phone = "+" + _digits
+        elif _digits.startswith("86") and len(_digits) == 13:
+            phone = "+" + _digits
+        elif _digits:
+            phone = "+86" + _digits
+        else:
+            phone = ""
+        try:
+            sp.tg_phone_input.text = phone
+        except Exception:
+            pass
         if not phone:
-            sp.set_tg_status('请输入手机号（含国家码，如 +8613800000000）', True)
+            sp.set_tg_status('请输入手机号（国内填 11 位即可，自动加 +86）', True)
             return
         if getattr(self, '_tg_login_stage', 'idle') in ('starting', 'sending_code', 'verifying'):
             return
