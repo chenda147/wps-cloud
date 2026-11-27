@@ -60,18 +60,57 @@ def _normalize_proxy(p, log=lambda m: None):
     return p
 
 
+def _native_lib_dirs():
+    """APK 原生库目录（可执行）。
+
+    Android 10+ 禁止执行应用私有目录（/data/data/<pkg>/files/...）里的可执行文件，
+    会直接 EACCES。所以内置二进制要以 libtdl.so 的形式打进 lib/<abi>/，
+    再从 nativeLibraryDir 执行。
+    """
+    dirs = []
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        d = act.getApplicationInfo().nativeLibraryDir
+        if d:
+            dirs.append(d)
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/maps", "r", errors="ignore") as f:
+            for line in f:
+                if "/lib/" not in line:
+                    continue
+                p = line.split()[-1]
+                i = p.rfind("/lib/")
+                if i > 0:
+                    d = p[:i]
+                    if d not in dirs:
+                        dirs.append(d)
+    except Exception:
+        pass
+    return dirs
+
+
 def find_tdl():
-    """定位 APK 内打包的 tdl 静态二进制（arm64），并补执行权限。"""
+    """定位内置的 tdl 静态二进制（arm64）。
+
+    优先 APK 原生库目录里的 libtdl.so（Android 10+ 只有这里可执行）；
+    应用私有目录里的 tools/tdl 仅作旧系统兜底。
+    """
+    cands = []
+    for d in _native_lib_dirs():
+        cands.append(os.path.join(d, "libtdl.so"))
     here = os.path.dirname(os.path.abspath(__file__))
-    cands = [os.path.join(here, "tools", "tdl"),
-             os.path.join(BASE_DIR, "tools", "tdl")]
+    cands += [os.path.join(here, "tools", "tdl"),
+              os.path.join(BASE_DIR, "tools", "tdl")]
     private = os.environ.get("ANDROID_PRIVATE", "")
     if private:
         cands.append(os.path.join(private, "files", "app", "tools", "tdl"))
         cands.append(os.path.join(private, "files", "tools", "tdl"))
     cands.append(os.path.join(os.path.dirname(here), "tools", "tdl"))
     for p in cands:
-        if os.path.isfile(p):
+        if p and os.path.isfile(p):
             try:
                 os.chmod(p, 0o755)
             except Exception:

@@ -16,16 +16,18 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,otf,json
 
 # (list) List of inclusions using pattern matching
-# tools/* 为随 APK 打包的静态二进制：
-#   tools/7zz  7-Zip 官方 Linux arm64 完全静态二进制（26.02），解压 7z/rar/zip
-#   tools/tdl  iyear/tdl v0.20.4 Linux arm64 静态二进制，Telegram 多线程下载（免 root）
-source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,mobile_tg_tdl.py,clash_api.py,fonts/*,tools/*
+# 随 APK 打包的静态二进制已改放 libs/arm64-v8a/（见下方 android.add_libs_arm64_v8a）：
+#   libs/arm64-v8a/lib7zz.so  7-Zip 官方 arm64 静态二进制（26.02），解压 7z/rar/zip
+#   libs/arm64-v8a/libtdl.so  iyear/tdl v0.20.4 arm64 静态二进制，TG 多线程下载（免 root）
+# 原因：Android 10+ 禁止执行应用私有目录（files/...）里的文件，会 EACCES；只有
+# APK 原生库目录（nativeLibraryDir）里的 lib*.so 可执行。
+source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,mobile_tg_tdl.py,clash_api.py,fonts/*
 
 # (list) Source files to exclude (let empty to not exclude anything)
 source.exclude_exts = pyc,pyo
 
 # (str) Application versioning (method 1)
-version = 1.1.4
+version = 1.1.5
 
 # (list) Application requirements
 # 注意：
@@ -121,6 +123,10 @@ android.release_artifact = aab
 
 # (list) Android additional libraries to compile into the app
 android.add_libs_armeabi = 
+# 内置 tdl（静态 arm64 二进制）：Android 10+ 禁止执行应用私有目录里的文件
+# （EACCES: Permission denied .../files/app/tools/tdl），必须放进 APK 的
+# lib/arm64-v8a/（nativeLibraryDir）才有执行权限。文件名必须以 lib*.so 结尾。
+android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
 
 # (str) Python-for-android branch to use
 # 固定到 v2024.01.21（2024年1月稳定版）：Gradle 8.0.2 + AGP 8.1.1，

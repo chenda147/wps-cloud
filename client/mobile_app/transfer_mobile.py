@@ -451,8 +451,17 @@ class TransferEngine:
     @staticmethod
     def _find_7zz():
         """定位 APK 内打包的 7zz 静态二进制（用于解压 7z/rar/zip）。
-        查找顺序：应用目录 tools/7zz → 脚本同目录 7zz → ANDROID_PRIVATE → 系统 PATH。"""
+
+        Android 10+ 禁止执行应用私有目录里的文件，所以优先用 APK 原生库目录中的
+        lib7zz.so（打包时必须放进 libs/arm64-v8a/）。其次是旧路径兜底。
+        """
         cands = []
+        try:
+            from mobile_tg_tdl import _native_lib_dirs
+            for d in _native_lib_dirs():
+                cands.append(os.path.join(d, "lib7zz.so"))
+        except Exception:
+            pass
         here = os.path.dirname(os.path.abspath(__file__))
         cands.append(os.path.join(here, "tools", "7zz"))
         cands.append(os.path.join(here, "7zz"))
