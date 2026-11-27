@@ -25,7 +25,7 @@ source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_upload
 source.exclude_exts = pyc,pyo
 
 # (str) Application versioning (method 1)
-version = 1.1.0
+version = 1.1.1
 
 # (list) Application requirements
 # 注意：
@@ -49,8 +49,8 @@ version = 1.1.0
 #    改用纯 Python 的 pyaes 实现 AES-CBC（见 yidong_core.py，含 PKCS7 pad/unpad 等价实现）。
 # 5) TG 下载已改为「内置 tdl（iyear/tdl v0.20.4 arm64 静态二进制）」：
 #    tools/tdl 随 APK 打包，多线程 + 多 DC 连接池并发下载（代理下可达 3MB/s+），
-#    支持 --continue 断点续传；登录用 tdl login -T qr，二维码在本机界面渲染扫码。
-#    不再需要 root、uiautomator 模拟点击，也不再需要 telethon。
+#    支持 --continue 断点续传；登录与 PC 客户端一致：手机号 + 验证码
+#    （tdl login -T code，用 os.openpty 提供伪终端）。不再需要 root、模拟点击或 telethon。
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,rsa==4.9,pyasn1==0.6.1,android
 
 # (str) Custom source folders for requirements

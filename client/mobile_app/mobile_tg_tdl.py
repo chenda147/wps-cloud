@@ -4,8 +4,9 @@
   - tdl 把文件切片、跨多个 DC 连接池并发拉取（-t 线程 + --pool 连接池），
     代理带宽能叠加到 3MB/s 以上；单条 MTProto 连接只有 0.1~0.3MB/s。
   - 稳定临时目录 + --continue 断点续传：失败保留分片，下次从断点继续。
-  - 登录：tdl login -T qr 的 ANSI 二维码在本模块解析成 0/1 矩阵，
-    由 Kivy 界面渲染成图片给用户扫（无需 root、无需模拟点击官方 Telegram）。
+  - 登录与 PC 一致：手机号 + 验证码（tdl login -T code）。
+    tdl 的 code 登录依赖 survey，必须跑在真终端上，这里用 os.openpty() 给它一个
+    伪终端，后台线程读提示、界面把手机号/验证码/两步验证密码写回。
   - 代理沿用 PC：本地 http 代理自动改 socks5（MTProto 必须）。
 
 登录态用 bolt 存储，目录固定在应用私有目录 tdl_data/；
@@ -23,8 +24,6 @@ import subprocess
 from config_helper import BASE_DIR
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-# tdl 二维码由 █ ▀ ▄ 和空格拼成，逐字符展开成上下两个像素
-_BLOCKS = {"\u2588": (1, 1), "\u2580": (1, 0), "\u2584": (0, 1), " ": (0, 0)}
 
 # 进度行形如：... 2.9% [........] [113.00 MB in 35.2s; ~ETA: 28m46s; 3.21 MB/s]
 _PCT_RE = re.compile(r"([\d.]+)%\s*\[[^\]]*\]\s*\[([^\]]*)\]")
@@ -36,14 +35,6 @@ _UNIT = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
 _SESSION_LOCK = threading.RLock()
 # 登录态缓存时长（秒）
 _LOGIN_TTL = 600
-
-# 登录状态（与界面约定）
-S_STARTING = 0     # 正在连接 Telegram 建 auth key
-S_WAITING = 1      # 二维码已显示，等用户扫
-S_CONFIRMING = 2   # 已扫码，正在迁移 DC（保留）
-S_SUCCESS = 3
-S_EXPIRED = 4
-S_FAILED = 5
 
 
 class TdlError(Exception):
@@ -130,49 +121,8 @@ def _clean(text):
     return _ANSI.sub("", text).replace("\x08", "")
 
 
-def last_qr_matrix(text):
-    """从 tdl 输出里取出最后一帧二维码，返回二维 0/1 矩阵（无有效帧返回 None）。
-
-    tdl 每次重画二维码的格式是「打印 N 行 + 连发 N 个光标上移(ESC[A)」，
-    不按光标上移切帧会把多次刷新拼成一张图。
-    """
-    text = _ANSI.sub(lambda m: m.group(0) if m.group(0).endswith("A") else "", text)
-    frames = re.split(r"(?:\x1b\[[0-9]*A)+", text)
-    block_lines = None
-    for seg in reversed(frames):
-        lines = [ln.rstrip("\r") for ln in seg.split("\n")]
-        qr = [ln for ln in lines if ln.strip() and all(ch in _BLOCKS for ch in ln)]
-        # 只接受画完的帧：完整帧末行只有 ▀/空格（底部空白边）
-        if len(qr) >= 10 and all(ch in (" ", "\u2580") for ch in qr[-1]):
-            block_lines = qr
-            break
-    if not block_lines:
-        return None
-    width = max(len(ln) for ln in block_lines)
-    rows = []
-    for ln in block_lines:
-        ln = ln.ljust(width)
-        top, bot = [], []
-        for ch in ln:
-            t, b = _BLOCKS.get(ch, (0, 0))
-            top.append(t)
-            bot.append(b)
-        rows.append(top)
-        rows.append(bot)
-    while rows and not any(rows[-1]):
-        rows.pop()
-    while rows and not any(rows[0]):
-        rows.pop(0)
-    if not rows or len(rows[0]) < 21:
-        return None
-    w = len(rows[0])
-    if len(rows) > w:
-        rows = rows[-w:]
-    return rows
-
-
 class TgTdl:
-    """tdl 封装：登录态检查 / 扫码登录 / 下载（含续传与进度解析）。"""
+    """tdl 封装：登录态检查 / 手机号验证码登录 / 下载（含续传与进度解析）。"""
 
     def __init__(self, proxy="", threads=16, pool=16, session_dir="", log_cb=None):
         self.tdl = find_tdl()
@@ -287,100 +237,8 @@ class TgTdl:
     def ensure_login(self, timeout=60):
         if self.is_logged_in(timeout=timeout):
             return True
-        self.last_output = "Telegram 未登录，请到「连接」页点「TG 登录」扫码"
+        self.last_output = "Telegram 未登录，请到「连接」页用手机号+验证码登录"
         self.log(self.last_output)
-        return False
-
-    def login_qr(self, on_qr=None, on_state=None, cancel_evt=None, timeout=300):
-        """拉起 tdl 扫码登录，阻塞到成功/失败。
-
-        on_qr(matrix)      每次二维码刷新时回调（0/1 二维数组）
-        on_state(state,msg) 状态变化：starting/waiting/confirming/success/expired/failed
-        cancel_evt         取消事件（用户关闭弹窗）
-        """
-        def emit(st, text=""):
-            try:
-                if on_state:
-                    on_state(st, text)
-            except Exception:
-                pass
-
-        if self._cached_ok():
-            emit(S_SUCCESS, "当前已登录，无需扫码")
-            return True
-        emit(S_STARTING, "正在连接 Telegram 生成二维码…")
-        deadline = time.time() + timeout
-        ok = False
-        _SESSION_LOCK.acquire()
-        try:
-            first = True
-            while time.time() < deadline:
-                if cancel_evt is not None and cancel_evt.is_set():
-                    emit(S_FAILED, "已取消")
-                    return False
-                buf = bytearray()
-                try:
-                    p = self._popen(["login", "-T", "qr"] + self._base_args())
-                except Exception as e:
-                    emit(S_FAILED, "启动 tdl 登录失败：%s" % e)
-                    self.last_output = str(e)
-                    return False
-                self._pump(p, buf)
-                last_key = None
-                last_emit = 0.0
-                while p.poll() is None and time.time() < deadline:
-                    if cancel_evt is not None and cancel_evt.is_set():
-                        try:
-                            p.kill()
-                        except Exception:
-                            pass
-                        emit(S_FAILED, "已取消")
-                        return False
-                    now = time.time()
-                    if on_qr and now - last_emit >= 0.4:
-                        txt = bytes(buf[-30000:]).decode("utf-8", "replace")
-                        m = last_qr_matrix(txt)
-                        if m:
-                            key = hash(tuple(tuple(r) for r in m))
-                            if key != last_key:
-                                last_key = key
-                                try:
-                                    on_qr(m)
-                                except Exception:
-                                    pass
-                                emit(S_WAITING, "请用手机 Telegram 扫码登录")
-                        last_emit = now
-                    time.sleep(0.3)
-                if p.poll() is None:
-                    try:
-                        p.kill()
-                    except Exception:
-                        pass
-                    emit(S_FAILED, "登录超时，请重试")
-                    return False
-                out = _clean(bytes(buf).decode("utf-8", "replace"))
-                up = out.upper()
-                self.last_output = out[-400:].strip()
-                if p.returncode == 0 and "LOGIN SUCCESSFULLY" in up:
-                    ok = True
-                    break
-                if "EXPIRED" in up and ("TOKEN" in up or "LOGIN" in up):
-                    # 二维码过期：tdl 自动退出，换一张新码继续等
-                    emit(S_EXPIRED, "二维码已过期，正在换新码…")
-                    self.log("[tdl] 二维码过期，自动换新码重试")
-                    time.sleep(1.2)
-                    first = False
-                    continue
-                emit(S_FAILED, (self.last_output.replace("\n", " ")[:160] or "登录失败"))
-                return False
-        finally:
-            _SESSION_LOCK.release()
-        if ok:
-            self._touch_ok()
-            emit(S_SUCCESS, "登录成功")
-            self.log("tdl 扫码登录成功")
-            return True
-        emit(S_FAILED, "登录超时，请重试")
         return False
 
     # ── 下载 ───────────────────────────────────────────────────
@@ -510,3 +368,191 @@ class TgTdl:
         if total < done:
             total = done
         return done, total, speed_mb
+
+
+class TgCodeLogin:
+    """用伪终端（os.openpty）驱动 tdl login -T code 的手机号 + 验证码登录。
+
+    与 PC 端 TdlCodeLogin 行为一致：tdl 的 code 登录走 survey 库，必须有真终端；
+    这里给它一个伪终端，后台线程识别“手机号 / 验证码 / 两步验证密码”提示，
+    通过 on_event 通知界面，界面再调 send() 把用户输入写回。
+
+    on_event 回调在后台线程触发，Kivy 需 Clock.schedule_once 切回 UI 线程。
+    事件：
+      ("prompt", "phone")      tdl 在等手机号
+      ("prompt", "code")       tdl 在等验证码（输错会再次触发，可重输）
+      ("prompt", "password")   tdl 在等两步验证(2FA)密码
+      ("log", text)            清理后的输出片段
+      ("error", text)          识别到的 Telegram 错误（友好文案）
+      ("done", ok, msg)        流程结束
+    """
+
+    # Telegram 错误码 → 友好提示（按出现顺序，先匹配先生效）
+    _ERRORS = [
+        ("PHONE_CODE_INVALID", "验证码错误，请重新获取"),
+        ("PHONE_CODE_EXPIRED", "验证码已过期，请重新获取"),
+        ("PHONE_CODE_EMPTY", "请输入验证码"),
+        ("PHONE_NUMBER_INVALID", "手机号格式不正确"),
+        ("PHONE_NUMBER_OCCUPIED", "该手机号已被其它账号占用"),
+        ("SESSION_PASSWORD_NEEDED", "账号开启了两步验证，需要输入云密码"),
+        ("PASSWORD_HASH_INVALID", "两步验证密码错误"),
+        ("FLOOD_WAIT", "操作过于频繁，请稍后再试"),
+        ("AUTH_TOKEN_EXPIRED", "登录令牌过期，请重试"),
+    ]
+
+    def __init__(self, dl, on_event):
+        self.dl = dl
+        self.on_event = on_event
+        self._proc = None
+        self._master = None
+        self._th = None
+        self._buf = ""
+        self._new = ""
+        self._closed = False
+        self._latch = None
+
+    def _emit(self, *ev):
+        try:
+            self.on_event(*ev)
+        except Exception:
+            pass
+
+    def start(self):
+        try:
+            master, slave = os.openpty()
+        except Exception as e:
+            raise TdlError("当前设备不支持伪终端（openpty 失败）：%s" % e)
+        try:
+            import fcntl
+            import struct
+            import termios
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
+        except Exception:
+            pass
+        args = [self.dl.tdl, "login", "-T", "code"] + self.dl._base_args()
+        try:
+            self._proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave,
+                                          env=self.dl._env(), cwd=self.dl.home,
+                                          close_fds=True)
+        finally:
+            try:
+                os.close(slave)
+            except Exception:
+                pass
+        self._master = master
+        try:
+            os.set_blocking(master, False)
+        except Exception:
+            pass
+        self._th = threading.Thread(target=self._reader, daemon=True, name="tdl-code-login")
+        self._th.start()
+
+    def send(self, text):
+        if self._master is None:
+            return
+        try:
+            os.write(self._master, (str(text).strip() + "\r").encode("utf-8"))
+        except Exception as e:
+            self._emit("log", "写入失败：%s" % e)
+
+    def close(self):
+        self._closed = True
+        p = self._proc
+        try:
+            if p is not None and p.poll() is None:
+                p.kill()
+        except Exception:
+            pass
+        try:
+            if self._master is not None:
+                os.close(self._master)
+        except Exception:
+            pass
+        self._master = None
+
+    def _reader(self):
+        import select
+        last_log = 0.0
+        while not self._closed:
+            try:
+                r, _, _ = select.select([self._master], [], [], 0.2)
+            except Exception:
+                break
+            if r:
+                try:
+                    data = os.read(self._master, 8192)
+                except OSError:
+                    data = b""
+                if data:
+                    txt = data.decode("utf-8", "replace")
+                    self._buf += txt
+                    self._new += txt
+                    self._scan()
+                    now = time.time()
+                    if now - last_log > 0.6:
+                        last_log = now
+                        self._emit("log", _clean(self._buf[-1200:]))
+            if self._proc is not None and self._proc.poll() is not None:
+                try:
+                    while True:
+                        data = os.read(self._master, 8192)
+                        if not data:
+                            break
+                        txt = data.decode("utf-8", "replace")
+                        self._buf += txt
+                        self._new += txt
+                        self._scan()
+                except Exception:
+                    pass
+                break
+        # 结束：以 is_logged_in 为准判定成功（tdl 已退出，不会抢 bolt 锁）
+        ok = False
+        try:
+            ok = self.dl.is_logged_in(use_cache=False)
+        except Exception:
+            ok = False
+        msg = "" if ok else self._diagnose()
+        self._emit("done", ok, msg)
+
+    def _scan(self):
+        seg = _clean(self._new).lower()
+        up = self._new.upper()
+        # 先处理错误：出错即解锁，让后续同类型提示（如验证码错误后重输）能再次触发
+        for key, friendly in self._ERRORS:
+            if key in up:
+                self._latch = None
+                self._emit("error", friendly)
+        # survey 会把旧提示残留在回显里，取“位置最靠后（最新出现）”的提示为准
+        candidates = (
+            ("phone", seg.rfind("enter your phone number")),
+            ("code", seg.rfind("enter code")),
+        )
+        i_pass = max(
+            seg.rfind("password"), seg.rfind("session_password_needed"),
+            seg.rfind("two-factor"), seg.rfind("2fa"),
+        )
+        candidates += (("password", i_pass),)
+        detected = None
+        best = -1
+        for name, idx in candidates:
+            if idx > best:
+                best = idx
+                detected = name
+        if detected and detected != self._latch:
+            self._latch = detected
+            self._emit("prompt", detected)
+        self._new = self._new[-300:]
+
+    def _diagnose(self):
+        up = self._buf.upper()
+        for key, friendly in self._ERRORS:
+            if key in up:
+                return friendly
+        tail = _clean(self._buf[-300:]).replace("\n", " ").strip()
+        try:
+            ec = self._proc.returncode if self._proc is not None else None
+        except Exception:
+            ec = None
+        if ec not in (0, None, -1):
+            return "tdl 退出码 %s：%s" % (ec, tail[:120])
+        return tail or "登录未成功"
