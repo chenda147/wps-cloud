@@ -733,7 +733,7 @@ class ClientWorker:
         self.log_cb("检查 tdl 登录态…")
         if not dl.ensure_login():
             self._post_task_status(session, url, tid, "failed",
-                                   "Telegram 未登录，请到「连接」页点「TG 登录」扫码")
+                                   "Telegram 未登录：请到「连接」页用手机号 + 验证码登录")
             return None
 
         _node_stop = threading.Event()
