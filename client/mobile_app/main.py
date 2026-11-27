@@ -61,6 +61,9 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.popup import Popup
 from kivy.uix.progressbar import ProgressBar
+from kivy.uix.checkbox import CheckBox
+from kivy.uix.widget import Widget
+from kivy.graphics.texture import Texture
 from kivy.core.window import Window
 from kivy.metrics import dp
 
@@ -193,10 +196,26 @@ class SettingsPage(BoxLayout):
         self.wps_input = self._row('WPS Cookie', cfg.get('wps_cookie', ''), multiline=True)
         self.parent_input = self._row('WPS 目标目录ID', cfg.get('wps_parent_id', '0'))
 
-        self._sep('Telegram 直连下载（可空）')
-        self.tg_id_input = self._row('TG api_id', cfg.get('tg_api_id', ''))
-        self.tg_hash_input = self._row('TG api_hash', cfg.get('tg_api_hash', ''))
-        self.tg_sess_input = self._row('TG session', cfg.get('tg_session', ''), multiline=True)
+        self._sep('Telegram 下载（内置 tdl，需扫码登录）')
+        self.tg_proxy_input = self._row('代理（如 socks5://127.0.0.1:7890）', cfg.get('tg_proxy', ''))
+        self.tdl_threads_input = self._row('下载线程数', str(cfg.get('tdl_threads', 16)))
+        self.tdl_pool_input = self._row('连接池大小', str(cfg.get('tdl_pool', 16)))
+        self.tg_switch_box = self._check_row('自动测速并切换最快节点（需开 FlClash 外部控制器）',
+                                            bool(cfg.get('tg_auto_switch', True)))
+        self.clash_api_input = self._row('Clash API 地址', cfg.get('tg_clash_api', '127.0.0.1:9090'))
+        self.clash_secret_input = self._row('Clash API Secret（可空）', cfg.get('tg_clash_secret', ''))
+        self.clash_group_input = self._row('节点分组名（可空=自动识别）', cfg.get('tg_clash_group', ''))
+        tg_login_btn = Button(text='TG 登录（扫码）', size_hint_y=None, height=dp(46),
+                              background_color=(0.18, 0.42, 0.68, 1), color=(1, 1, 1, 1))
+        tg_login_btn.bind(on_release=lambda *a: self.app.open_tg_login())
+        self.body.add_widget(tg_login_btn)
+        tg_tip = Label(text='首次使用需扫码登录：手机 Telegram → 设置 → 设备 → 关联桌面设备。'
+                             '登录态保存在应用私有目录，只需登录一次。',
+                       font_size='11sp', color=(0.52, 0.55, 0.59, 1), halign='left', valign='top',
+                       size_hint_y=None)
+        tg_tip.bind(width=lambda *a: setattr(tg_tip, 'text_size', (tg_tip.width, None)))
+        tg_tip.bind(texture_size=lambda *a: setattr(tg_tip, 'height', tg_tip.texture_size[1]))
+        self.body.add_widget(tg_tip)
 
         self._sep('下载存储')
         self.dir_input = self._row('下载临时目录(可空)', cfg.get('save_dir', ''))
@@ -243,6 +262,19 @@ class SettingsPage(BoxLayout):
         self.body.add_widget(inp)
         return inp
 
+    def _check_row(self, title, default=False):
+        """带复选框的设置行（用于开关类配置）。"""
+        box = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        lbl = Label(text=title, font_size='13sp', color=(0.8, 0.85, 0.9, 1),
+                    halign='left', valign='middle')
+        lbl.bind(size=lambda w, v: setattr(w, 'text_size', (w.width, None)))
+        cb = CheckBox(active=bool(default), size_hint_x=None, width=dp(44),
+                      color=(0.30, 0.78, 0.55, 1))
+        box.add_widget(lbl)
+        box.add_widget(cb)
+        self.body.add_widget(box)
+        return cb
+
     def _sep(self, text):
         lbl = Label(text=text, bold=True, font_size='13sp',
                     color=(0.30, 0.78, 0.55, 1), halign='left',
@@ -270,9 +302,13 @@ class SettingsPage(BoxLayout):
             'wps_cookie': self.wps_input.text.strip(),
             'wps_parent_id': self.parent_input.text.strip() or '0',
             'save_dir': self.dir_input.text.strip(),
-            'tg_api_id': self.tg_id_input.text.strip(),
-            'tg_api_hash': self.tg_hash_input.text.strip(),
-            'tg_session': self.tg_sess_input.text.strip(),
+            'tg_proxy': self.tg_proxy_input.text.strip(),
+            'tdl_threads': int(self.tdl_threads_input.text.strip() or 16),
+            'tdl_pool': int(self.tdl_pool_input.text.strip() or 16),
+            'tg_auto_switch': bool(self.tg_switch_box.active),
+            'tg_clash_api': self.clash_api_input.text.strip() or '127.0.0.1:9090',
+            'tg_clash_secret': self.clash_secret_input.text.strip(),
+            'tg_clash_group': self.clash_group_input.text.strip(),
         })
         save_config(cfg)
         self.app.notify('配置已保存')
@@ -388,6 +424,74 @@ class LogsPage(BoxLayout):
             self.log_text.text = '\n'.join(lines[-300:])
 
 
+class QrImage(Widget):
+    """把 tdl 输出的 0/1 二维码矩阵渲染成图片（最近邻放大，边缘清晰可扫）。"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        from kivy.graphics import Color, Rectangle
+        self._tex = None
+        with self.canvas:
+            Color(1, 1, 1, 1)
+            self._rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._sync, size=self._sync)
+
+    def _sync(self, *_):
+        side = min(self.width, self.height)
+        self._rect.pos = (self.center_x - side / 2, self.center_y - side / 2)
+        self._rect.size = (side, side)
+
+    def set_matrix(self, m):
+        if not m or not m[0]:
+            return
+        h, w = len(m), len(m[0])
+        buf = bytearray()
+        for row in m:
+            for v in row:
+                c = 0 if v else 255
+                buf += bytes((c, c, c, 255))
+        tex = Texture.create(size=(w, h), colorfmt='rgba')
+        tex.blit_buffer(bytes(buf), colorfmt='rgba', bufferfmt='ubyte')
+        tex.mag_filter = 'nearest'
+        tex.min_filter = 'nearest'
+        self._tex = tex
+        self._rect.texture = tex
+        self._sync()
+
+
+class TgLoginPopup(Popup):
+    """Telegram 扫码登录弹窗：后台跑 tdl login -T qr，界面只负责显示二维码与状态。"""
+
+    def __init__(self, app_ref, **kw):
+        super().__init__(title='Telegram 登录', size_hint=(0.92, 0.92), **kw)
+        self.app = app_ref
+        box = BoxLayout(orientation='vertical', spacing=dp(8), padding=dp(10))
+        self.status = Label(text='正在连接 Telegram…', size_hint_y=None, height=dp(56),
+                            font_size='13sp', color=(0.85, 0.9, 0.95, 1),
+                            halign='center', valign='middle')
+        self.status.bind(size=lambda w, v: setattr(w, 'text_size', (w.width, None)))
+        self.qr = QrImage()
+        tip = Label(text='手机 Telegram → 设置 → 设备 → 关联桌面设备 → 扫描二维码\n'
+                         '扫码时请保持本窗口打开，不要切走',
+                    size_hint_y=None, height=dp(48), font_size='12sp',
+                    color=(0.6, 0.65, 0.7, 1), halign='center', valign='middle')
+        tip.bind(size=lambda w, v: setattr(w, 'text_size', (w.width, None)))
+        close = Button(text='关闭', size_hint_y=None, height=dp(44))
+        close.bind(on_release=lambda *a: self.dismiss())
+        box.add_widget(self.status)
+        box.add_widget(self.qr)
+        box.add_widget(tip)
+        box.add_widget(close)
+        self.content = box
+
+    def set_state(self, state, text=''):
+        if text:
+            self.status.text = text
+
+    def set_qr(self, matrix):
+        self.qr.set_matrix(matrix)
+
+
 class WpsTransferApp(App):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -479,6 +583,40 @@ class WpsTransferApp(App):
             self._stop_worker()
         if was:
             Clock.schedule_once(lambda dt: self._start_worker(), 0.5)
+
+    # ── Telegram 扫码登录 ──
+
+    def open_tg_login(self):
+        """弹出二维码窗口，后台用 tdl 完成扫码登录（与 PC 同一套 tdl 登录态格式）。"""
+        cfg = load_config()
+        popup = TgLoginPopup(self)
+        self._tg_login_cancel = threading.Event()
+        popup.bind(on_dismiss=lambda *a: self._tg_login_cancel.set())
+        popup.open()
+
+        def _run():
+            try:
+                from mobile_tg_tdl import TgTdl
+                dl = TgTdl(proxy=(cfg.get('tg_proxy') or '').strip(),
+                           threads=cfg.get('tdl_threads') or 16,
+                           pool=cfg.get('tdl_pool') or 16,
+                           log_cb=self.log)
+            except Exception as e:
+                Clock.schedule_once(lambda dt: popup.set_state('failed', f'初始化失败：{e}'))
+                return
+            if dl.is_logged_in(use_cache=True):
+                Clock.schedule_once(lambda dt: popup.set_state('success', '当前已登录，无需扫码'))
+                return
+            try:
+                dl.login_qr(
+                    on_qr=lambda m: Clock.schedule_once(lambda dt: popup.set_qr(m)),
+                    on_state=lambda st, txt: Clock.schedule_once(
+                        lambda dt: popup.set_state(st, txt)),
+                    cancel_evt=self._tg_login_cancel, timeout=300)
+            except Exception as e:
+                Clock.schedule_once(lambda dt: popup.set_state('failed', f'登录异常：{e}'))
+
+        threading.Thread(target=_run, daemon=True, name='tg-login').start()
 
     def on_stop(self):
         self._stop_worker()

@@ -16,14 +16,16 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,otf,json
 
 # (list) List of inclusions using pattern matching
-# tools/* 为 7-Zip 官方 Linux arm64 完全静态二进制 7zz（26.02），用于手机端解压 7z/rar/zip
-source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,local_tg_download.py,fonts/*,tools/*
+# tools/* 为随 APK 打包的静态二进制：
+#   tools/7zz  7-Zip 官方 Linux arm64 完全静态二进制（26.02），解压 7z/rar/zip
+#   tools/tdl  iyear/tdl v0.20.4 Linux arm64 静态二进制，Telegram 多线程下载（免 root）
+source.include_patterns = yidong_core.py,quark_core.py,quark_saver.py,wps_uploader.py,chase_engine.py,transfer_mobile.py,worker.py,config_helper.py,main.py,mobile_tg_tdl.py,clash_api.py,fonts/*,tools/*
 
 # (list) Source files to exclude (let empty to not exclude anything)
 source.exclude_exts = pyc,pyo
 
 # (str) Application versioning (method 1)
-version = 1.0.9
+version = 1.1.0
 
 # (list) Application requirements
 # 注意：
@@ -45,8 +47,10 @@ version = 1.0.9
 # 4) 不用 pycryptodome！其 C 扩展（_raw_ecb.so 等）在 p4a 交叉编译后，Android 运行时
 #    ctypes 加载报 "undefined symbol: PyObject_GetBuffer" 直接崩溃（两次实测确认）。
 #    改用纯 Python 的 pyaes 实现 AES-CBC（见 yidong_core.py，含 PKCS7 pad/unpad 等价实现）。
-# 5) TG 下载已改为「本机 root 模拟点击官方 Telegram」（local_tg_download.py），
-#    与 PC 客户端同一套逻辑，不再需要 telethon（已从依赖与打包清单移除）。
+# 5) TG 下载已改为「内置 tdl（iyear/tdl v0.20.4 arm64 静态二进制）」：
+#    tools/tdl 随 APK 打包，多线程 + 多 DC 连接池并发下载（代理下可达 3MB/s+），
+#    支持 --continue 断点续传；登录用 tdl login -T qr，二维码在本机界面渲染扫码。
+#    不再需要 root、uiautomator 模拟点击，也不再需要 telethon。
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,requests==2.31.0,chardet==5.2.0,charset_normalizer==2.1.0,pyaes==1.6.1,rsa==4.9,pyasn1==0.6.1,android
 
 # (str) Custom source folders for requirements

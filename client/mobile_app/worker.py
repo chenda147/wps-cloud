@@ -85,14 +85,24 @@ class ClientWorker:
         threading.Thread(target=self._srv_loop, daemon=True).start()
 
     def _log_tg_env(self):
-        """连接时先探测 root / 官方 Telegram：首次会在手机上弹出 root 授权框，
-        用户点“允许”后后续所有模拟点击都直接可用。"""
+        """连接时探测内置 tdl：打印可执行文件路径与版本，缺文件时明确提示。"""
         try:
-            import local_tg_download as ltg
-            ok, _pkg, detail = ltg.probe()
-            self.log_cb(f"[TG] 模拟点击环境：{detail}")
+            import mobile_tg_tdl as mtdl
+            path = mtdl.find_tdl()
+            if not path:
+                self.log_cb("[TG] 未找到内置 tdl（tools/tdl），TG 任务将无法执行")
+                return
+            self.log_cb(f"[TG] tdl 已就绪：{path}")
+            try:
+                import subprocess
+                r = subprocess.run([path, "version"], capture_output=True, text=True, timeout=10)
+                last = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+                if last:
+                    self.log_cb("[TG] " + last[-1][:120])
+            except Exception:
+                pass
         except Exception as e:
-            self.log_cb(f"[TG] 模拟点击模块异常：{e}")
+            self.log_cb(f"[TG] tdl 模块异常：{e}")
 
     def stop(self):
         self._stop.set()
@@ -655,7 +665,7 @@ class ClientWorker:
         return tcb
 
     def _tg_do_download(self, session, url, task):
-        """下载阶段：本机 root 模拟点击官方 Telegram 下载（与 PC 端同一套逻辑）。
+        """下载阶段：内置 tdl（多线程 + 多 DC 连接池）下载，与 PC 客户端一致。
         返回本地文件路径；失败返回 None（并已上报任务状态）。"""
         tid = task.get("id", "")
         name = task.get("file_name") or task.get("name") or "tg_file"
@@ -677,30 +687,87 @@ class ClientWorker:
         tcb = self._tg_progress_maker(session, url, task, name)
         self.log_cb(f"[TG] 开始下载：{name}")
 
-        # 只走模拟点击官方 Telegram（不用 Telethon）
+        # 内置 tdl：把文件切片后跨多个 DC 连接池并发拉取（代理下可到 3MB/s+）
         try:
-            import local_tg_download as ltg
+            import mobile_tg_tdl as mtdl
         except Exception as e:
-            self.log_cb(f"[TG] 下载模块加载失败：{e}")
-            self._post_task_status(session, url, tid, "failed", f"下载模块加载失败：{e}")
+            self.log_cb(f"[TG] tdl 模块加载失败：{e}")
+            self._post_task_status(session, url, tid, "failed", f"tdl 模块加载失败：{e}")
             return None
-        ok, _pkg, detail = ltg.probe()
-        self.log_cb(f"[TG] 模拟点击环境：{detail}")
-        if not ok:
-            self._post_task_status(session, url, tid, "failed", detail)
+        link = mtdl.build_link(task.get("channel_value") or task.get("chat_id"),
+                               task.get("msg_id"), task.get("link") or "")
+        if not link:
+            self._post_task_status(session, url, tid, "failed", "无法构造 Telegram 链接")
+            return None
+        try:
+            dl = mtdl.TgTdl(proxy=(cfg.get("tg_proxy") or "").strip(),
+                            threads=cfg.get("tdl_threads") or 16,
+                            pool=cfg.get("tdl_pool") or 16,
+                            log_cb=lambda m: self.log_cb("[tdl] " + m))
+        except mtdl.TdlError as e:
+            self.log_cb(f"[TG] {e}")
+            self._post_task_status(session, url, tid, "failed", str(e))
             return None
 
-        def _p(done, spd):
-            tcb("download", done, 0, spd)
+        # ── FlClash 节点延时测速 + 自动切换（与 PC 同一套逻辑）──
+        ctl = None
+        if cfg.get("tg_auto_switch", True):
+            try:
+                import clash_api
+                ctl = clash_api.ClashController(
+                    api=cfg.get("tg_clash_api") or "127.0.0.1:9090",
+                    secret=cfg.get("tg_clash_secret") or "",
+                    group=cfg.get("tg_clash_group") or "",
+                    log_cb=lambda m: self.log_cb("[TG节点] " + m))
+                if not ctl.available():
+                    ctl = None
+                else:
+                    # 任务开始前先选一次最快节点，再启动 tdl
+                    _r = ctl.select_fastest(force=True)
+                    if _r and _r.get("switched"):
+                        ctl.close_telegram_connections()
+            except Exception as e:
+                self.log_cb(f"[TG节点] 自动选节点不可用：{e}")
+                ctl = None
 
-        path, err = ltg.download(
-            task.get("channel_value") or task.get("chat_id"),
-            task.get("msg_id"), dest, log=self.log_cb,
-            progress=_p, cancel=cancel_evt, timeout_min=90,
-            size_text=task.get("size_text") or "",
-            link=task.get("link") or "")
-        if path:
-            return path
+        self.log_cb("检查 tdl 登录态…")
+        if not dl.ensure_login():
+            self._post_task_status(session, url, tid, "failed",
+                                   "Telegram 未登录，请到「连接」页点「TG 登录」扫码")
+            return None
+
+        _node_stop = threading.Event()
+        _spd_box = {"v": 0.0}  # 最近一次下载速度(MB/s)，供节点监控判断
+
+        def _node_monitor():
+            """下载期间每 2 分钟测一次延时；只有速度偏低时才真正切换节点"""
+            interval = max(60, int(cfg.get("tg_switch_interval") or 120))
+            while not _node_stop.wait(interval):
+                if cancel_evt is not None and cancel_evt.is_set():
+                    break
+                try:
+                    # 速度 ≥3.0MB/s 说明当前节点正常，只测速不切换
+                    _r = ctl.select_fastest(allow_switch=_spd_box["v"] < 3.0)
+                    if _r and _r.get("switched"):
+                        # 只断开 Telegram 连接，让 tdl 走新节点重连，不打断下载进程
+                        ctl.close_telegram_connections()
+                except Exception as e:
+                    self.log_cb(f"[TG节点] 测速异常：{e}")
+
+        def _p(done, total, speed_mb):
+            _spd_box["v"] = float(speed_mb or 0)
+            spd = ("%.2fMB/s" % speed_mb) if speed_mb else ""
+            tcb("download", done, total, spd)
+
+        if ctl is not None:
+            threading.Thread(target=_node_monitor, daemon=True,
+                             name="tg-node-monitor").start()
+        try:
+            ok, err = dl.download(link, dest, progress_cb=_p, cancel_evt=cancel_evt)
+        finally:
+            _node_stop.set()
+        if ok:
+            return dest
         if cancel_evt is not None and cancel_evt.is_set():
             self._post_task_status(session, url, tid, "skipped", "已取消", retries=1)
         else:
