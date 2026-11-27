@@ -467,7 +467,6 @@ class TgLoginPopup(Popup):
 
         box.add_widget(self.status)
         box.add_widget(self.phone)
-        box.add_widget(send_btn)
         box.add_widget(self.code)
         box.add_widget(self.pwd)
         box.add_widget(row)
