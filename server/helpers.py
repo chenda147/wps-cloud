@@ -270,13 +270,21 @@ def get_mime(filename):
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg",
     }
     return mime_map.get(ext, "application/octet-stream")
-def _client_active_count(client_name):
-    """统计某客户端当前 running 状态的任务数"""
+def _client_active_count(client_name, exclude_tg_upload=False):
+    """统计某客户端当前 running 状态的任务数。
+
+    exclude_tg_upload=True 时，处于上传阶段的 tg-download 任务不计入
+    （上传不占用下载槽位，使“本集上传 + 下一集下载”的流水线成为可能）。
+    仅用于派发上限计算；断连恢复等其它场景仍统计全部 running 任务（默认）。
+    """
     count = 0
     for tid in list(_CLIENT_QUEUE):
         t = _CLIENT_TASKS.get(tid)
-        if t and t.get("status") == "running" and t.get("polled_by") == client_name:
-            count += 1
+        if not (t and t.get("status") == "running" and t.get("polled_by") == client_name):
+            continue
+        if exclude_tg_upload and t.get("type") == "tg-download" and t.get("stage") == "upload":
+            continue
+        count += 1
     return count
 REGEX_FILE = os.path.join(DATA_DIR, "regex_patterns.json")
 DEFAULT_REGEX_PATTERNS = [
@@ -1034,6 +1042,7 @@ def _build_chase_file_info(chase, ep_num, siblings=None, manual=None):
     template = chase.get("rename_template", chase["name"] + "E{ep}")
     season = chase.get("season", 0)
     ep_pattern = chase.get("ep_pattern", "")
+    file_name = siblings.get(str(ep_num), "")
     # ① 优先从 ep_pattern 中提取季别（如 S02E(\d+) → 2，最权威）
     if ep_pattern:
         sp = re.search(r'[Ss](\d+)', ep_pattern)
@@ -1042,29 +1051,32 @@ def _build_chase_file_info(chase, ep_num, siblings=None, manual=None):
                 season = int(sp.group(1))
             except Exception:
                 pass
-    # ② 其次从文件名中提取季别（精确匹配 SxxExx，避免文件名中其他 Sxx 干扰）
-    file_name = siblings.get(str(ep_num), "")
-    season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})E\d+', file_name)
-    if not season_from_file:
-        season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})(?![0-9])', file_name)
-    if season_from_file:
-        season = int(season_from_file.group(1))
-    else:
-        # ③ 文件无季标记（如 "01.mp4"/"第01集.mp4"）：
-        #    优先取「指定集数」中的唯一季（如 S02E01-S02E08 → 2）；
-        #    否则默认 S01 —— 与预览 test_pattern/preview_files 保持一致，
-        #    避免模板渲染出 S00、WPS 落到根目录，与同季其他文件（Season 1）不一致。
-        try:
-            _ef = (chase.get("episodes_filter") or "").strip()
-            if _ef:
-                _wm = parse_episodes_filter(_ef)
-                _slist = sorted(k for k in _wm if k > 0)
-                if len(_slist) == 1:
-                    season = _slist[0]
-        except Exception:
-            pass
-        if season <= 0:
-            season = 1
+    # 用户已显式指定季数（配置 season>0 或 ep_pattern 含 S）→ 锁定，
+    # 不再被源文件名里的 Sxx 覆盖。源文件命名可能与用户配置的季不一致
+    # （例：用户配 season=6，源文件却叫 S07E01.mp4），此时必须以用户配置为准。
+    if season <= 0:
+        # ② 未指定时，从文件名中提取季别（精确匹配 SxxExx，避免文件名中其他 Sxx 干扰）
+        season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})E\d+', file_name)
+        if not season_from_file:
+            season_from_file = re.search(r'(?<![A-Za-z])[Ss](\d{2})(?![0-9])', file_name)
+        if season_from_file:
+            season = int(season_from_file.group(1))
+        else:
+            # ③ 文件无季标记（如 "01.mp4"/"第01集.mp4"）：
+            #    优先取「指定集数」中的唯一季（如 S02E01-S02E08 → 2）；
+            #    否则默认 S01 —— 与预览 test_pattern/preview_files 保持一致，
+            #    避免模板渲染出 S00、WPS 落到根目录，与同季其他文件（Season 1）不一致。
+            try:
+                _ef = (chase.get("episodes_filter") or "").strip()
+                if _ef:
+                    _wm = parse_episodes_filter(_ef)
+                    _slist = sorted(k for k in _wm if k > 0)
+                    if len(_slist) == 1:
+                        season = _slist[0]
+            except Exception:
+                pass
+            if season <= 0:
+                season = 1
     tmdb_id = chase.get("tmdb_id", "")
     # 处理 {name}、{season}、{tmdb_id} 占位符
     year = chase.get("year", "")

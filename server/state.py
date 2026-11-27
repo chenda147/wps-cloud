@@ -45,7 +45,7 @@ AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".ape"}
 
 # 构建标记：每次修复“掉登录”问题时递增。用户在登录页 / 401 提示里看到这串，
 # 即可确认当前运行的是否为最新代码（避免改了代码但镜像没重建的假象）。
-SERVER_BUILD = "20261124-auth-2"
+SERVER_BUILD = "20261127-pipeline"
 
 # 挂载根目录缓存 {storage_id: real_folder_id}
 _mount_root_cache = {}

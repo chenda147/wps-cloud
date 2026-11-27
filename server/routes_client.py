@@ -137,20 +137,19 @@ def api_client_creds():
                            "cookie": acc.get("cookie") or ""})
     except Exception:
         clouds = []
-    tg_api_id, tg_api_hash, tg_session = "", "", ""
+    tg_api_id, tg_api_hash = "", ""
     try:
         from .routes_telegram import TG_CONFIG_FILE
         with open(TG_CONFIG_FILE, "r", encoding="utf-8") as f:
             _tg = json.load(f)
         tg_api_id = _tg.get("api_id", "") or ""
         tg_api_hash = _tg.get("api_hash", "") or ""
-        # 客户端下载专用会话：与服务端搜索会话相互独立，避免互踢
-        tg_session = _tg.get("client_session", "") or ""
     except Exception:
         pass
+    # 下载会话不下发：PC 客户端用自己的 tdl 登录态（本地扫码登录），
+    # 避免同一账号的 auth key 在多处共用被 Telegram 判定重复登录。
     return jsonify({"success": True, "wps_cookie": wps_cookie, "clouds": clouds,
-                    "tg_api_id": tg_api_id, "tg_api_hash": tg_api_hash,
-                    "tg_session": tg_session})
+                    "tg_api_id": tg_api_id, "tg_api_hash": tg_api_hash})
 
 
 @bp.route("/api/client/poll")
@@ -342,13 +341,6 @@ def api_client_poll():
         for tid in list(_CLIENT_QUEUE):
             task = _CLIENT_TASKS.get(tid)
             if task and task.get("status") == "pending":
-                # TG 下载任务只派给手机客户端：必须借用手机上的 Telegram 官方客户端通道，
-                # PC 客户端（Telethon 直连）速度只有 0.1MB/s，不再参与领取。
-                # 追更/资源里显式指定了 target_client 的除外（按指定优先）。
-                if (task.get("type") == "tg-download"
-                        and not task.get("target_client")
-                        and client_platform != "mobile"):
-                    continue
                 # 该集最近被用户停止/取消（60 秒内）：不派发。即使任务已被 check
                 # 一次性创建进队列，只要该集上报过取消，就拒绝派发，防止刷屏
                 _ceps1 = task.get("ep_num")
@@ -394,9 +386,12 @@ def api_client_poll():
                 if not target or target == client_name:
                     matched_tasks.append(tid)
         # ── 计算可分配数量：不超过 batch 且不超过客户端 max_concurrent - 当前活跃数 ──
+        # 活跃数排除“已进入上传阶段的 tg-download”：上传不占用下载槽，
+        # 这样本集上传时服务端会派发下一集，客户端的下载串行/上传并行流水线才生效。
+        # 断连恢复等逻辑仍使用 _CLIENT_ACTIVE（全量 running 计数），互不影响。
         max_available = batch
         if client_name:
-            active_now = _CLIENT_ACTIVE.get(client_name, 0)
+            active_now = _client_active_count(client_name, exclude_tg_upload=True)
             client_max = _CLIENT_REGISTRY.get(client_name, {}).get("max_concurrent", 3)
             max_available = min(batch, max(client_max - active_now, 0))
         # ── 分配任务：只分配匹配本客户端名的任务（锁内二次校验 status，杜绝并发重复下发） ──

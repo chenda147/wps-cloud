@@ -3329,6 +3329,7 @@ function showChaseDialog(editId) {
             document.getElementById('chaseYear').value = t.year||'';
             document.getElementById('chaseCategory').value = t.category||'国漫';
             document.getElementById('chaseShowFolder').value = t.show_folder||'';
+            _sfTouched = false;  // 回填服务端值后重置标记，允许 autoSave 同步最新值
             document.getElementById('chaseShareUrl').value = t.share_url||'';
             document.getElementById('chaseSharePasswd').value = t.share_passwd||'';
             document.getElementById('chaseBaseEp').value = t.base_ep||0;
@@ -3552,6 +3553,7 @@ function quickTemplate() {
     document.getElementById('chaseRenameTemplate').value = template;
     // 剧名文件夹也要带上 tmdbid 用于 Emby/Jellyfin 锁定匹配
     document.getElementById('chaseShowFolder').value = fullName + tmdbSuffix;
+    _sfTouched = true;  // 用户主动生成模板，保留其 show_folder 设定
     showToast('已生成模板: ' + template);
 }
 
@@ -3806,6 +3808,7 @@ function applyWpsDir(el) {
     document.getElementById('chaseSeason').value = season;
     document.getElementById('chaseTmdbId').value = tmdbId;
     document.getElementById('chaseShowFolder').value = showFolder;
+    _sfTouched = true;  // 用户主动从 WPS 选了文件夹，保留其选择
     document.getElementById('chaseDirList').style.display = 'none';
     document.getElementById('chaseDirList').innerHTML = '';
     if (typeof onChaseCategoryChange === 'function') onChaseCategoryChange();
@@ -4037,6 +4040,7 @@ function localTestPattern(files, epPattern, renameTemplate, _chaseName, resultDi
 let chaseSaveTimer = null;
 let chaseDirty = false;
 let chaseSnapshot = null;   // 编辑模式打开时的原始快照，用于「取消」回滚
+let _sfTouched = false;     // 剧名文件夹(show_folder)是否被用户主动改动（生成模板/选WPS文件夹），防止旧缓存覆盖
 
 // 收集弹窗表单字段构造请求体（校验失败抛异常）
 function buildChaseBody() {
@@ -4103,6 +4107,18 @@ function initChaseAutoSave() {
 async function autoSaveChase() {
     const editId = document.getElementById('chaseEditId').value;
     if (!editId) return false;
+    // 防旧缓存覆盖：若用户未主动改动剧名文件夹(show_folder)，提交前从服务端拉最新值同步，
+    // 避免页面长时间未刷新时，本地缓存的旧 show_folder 把服务端已修复的值覆盖回去。
+    if (!_sfTouched) {
+        try {
+            const lr = await fetch('/api/admin/chase');
+            const ld = await lr.json();
+            const lt = (ld.tasks || []).find(x => x.id === editId);
+            if (lt && lt.show_folder !== undefined) {
+                document.getElementById('chaseShowFolder').value = lt.show_folder || '';
+            }
+        } catch (e) { /* 拉取失败则继续用本地值 */ }
+    }
     let body;
     try { body = buildChaseBody(); }
     catch (e) { return false; }
